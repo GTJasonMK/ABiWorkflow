@@ -23,6 +23,10 @@ def get_provider(name: str | None = None) -> VideoProvider:
         from app.video_providers.http_provider import HttpVideoProvider
         return HttpVideoProvider(output_dir=settings.video_output_dir)
 
+    if provider_name == "ggk":
+        from app.video_providers.ggk_provider import GgkVideoProvider
+        return GgkVideoProvider(output_dir=settings.video_output_dir)
+
     if provider_name in _registry:
         return _registry[provider_name]()
 

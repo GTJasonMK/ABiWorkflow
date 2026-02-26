@@ -11,4 +11,5 @@ export interface PaginatedResponse<T> {
   total: number
   page: number
   page_size: number
+  stats?: Record<string, number>
 }

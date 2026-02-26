@@ -29,8 +29,10 @@ class ConnectionManager:
 
     def disconnect(self, project_id: str, websocket: WebSocket):
         if project_id in self.active_connections:
-            self.active_connections[project_id].remove(websocket)
-            if not self.active_connections[project_id]:
+            connections = self.active_connections[project_id]
+            if websocket in connections:
+                connections.remove(websocket)
+            if not connections:
                 del self.active_connections[project_id]
         logger.info("WebSocket 连接断开: project=%s", project_id)
 

@@ -2,15 +2,19 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import settings
 from app.llm.base import LLMAdapter, Message
 from app.models import Character, Project, Scene, SceneCharacter
 from app.prompts.narrative_analysis import NARRATIVE_ANALYSIS_SYSTEM, NARRATIVE_ANALYSIS_USER
 from app.prompts.prompt_generation import PROMPT_GENERATION_SYSTEM, PROMPT_GENERATION_USER
+from app.services.composition_state import mark_completed_compositions_stale
+from app.services.progress import publish_progress
 
 logger = logging.getLogger(__name__)
 
@@ -84,9 +88,13 @@ class ScriptParserService:
 
     async def analyze_narrative(self, script_text: str) -> NarrativeAnalysis:
         """第一阶段：叙事结构分析"""
+        max_sec = int(settings.video_provider_max_duration_seconds)
         messages = [
-            Message(role="system", content=NARRATIVE_ANALYSIS_SYSTEM),
-            Message(role="user", content=NARRATIVE_ANALYSIS_USER.format(script_text=script_text)),
+            Message(role="system", content=NARRATIVE_ANALYSIS_SYSTEM.format(max_scene_seconds=max_sec)),
+            Message(role="user", content=NARRATIVE_ANALYSIS_USER.format(
+                script_text=script_text,
+                max_scene_seconds=max_sec,
+            )),
         ]
 
         for attempt in range(MAX_RETRIES):
@@ -103,6 +111,8 @@ class ScriptParserService:
 
     async def generate_scene_prompts(self, analysis: NarrativeAnalysis) -> list[ScenePrompt]:
         """第二阶段：为每个场景生成视频提示词"""
+        max_sec = int(settings.video_provider_max_duration_seconds)
+
         global_style = (
             f"风格: {analysis.global_style.visual_style}, "
             f"色调: {analysis.global_style.color_tone}, "
@@ -123,11 +133,12 @@ class ScriptParserService:
         )
 
         messages = [
-            Message(role="system", content=PROMPT_GENERATION_SYSTEM),
+            Message(role="system", content=PROMPT_GENERATION_SYSTEM.format(max_scene_seconds=max_sec)),
             Message(role="user", content=PROMPT_GENERATION_USER.format(
                 global_style=global_style,
                 characters_info=characters_info,
                 scenes_info=scenes_info,
+                max_scene_seconds=max_sec,
             )),
         ]
 
@@ -146,11 +157,17 @@ class ScriptParserService:
 
     async def parse_script(self, project_id: str, script_text: str, db: AsyncSession) -> ParseResult:
         """完整解析流程：分析 → 生成 → 持久化"""
+        publish_progress(project_id, "parse_progress", {"message": "正在进行叙事分析...", "percent": 10})
+
         # 第一阶段：叙事分析
         analysis = await self.analyze_narrative(script_text)
+        publish_progress(project_id, "parse_progress", {"message": "叙事分析完成，正在生成场景提示词...", "percent": 35})
 
         # 第二阶段：生成视频提示词
         scene_prompts = await self.generate_scene_prompts(analysis)
+        publish_progress(project_id, "parse_progress", {"message": "提示词生成完成，正在写入角色与场景...", "percent": 60})
+        if not scene_prompts:
+            raise RuntimeError("未生成任何场景提示词，请检查剧本内容后重试")
         if len(scene_prompts) != len(analysis.scenes):
             raise RuntimeError(
                 f"提示词场景数({len(scene_prompts)})与叙事场景数({len(analysis.scenes)})不一致，请重试解析"
@@ -163,29 +180,39 @@ class ScriptParserService:
         old_chars = (await db.execute(select(Character).where(Character.project_id == project_id))).scalars().all()
         for c in old_chars:
             await db.delete(c)
+        await mark_completed_compositions_stale(db, project_id)
         await db.flush()
+        publish_progress(project_id, "parse_progress", {"message": "历史数据已清理，正在创建角色...", "percent": 72})
 
         # 持久化角色
         char_map: dict[str, Character] = {}
         for cp in analysis.characters:
+            normalized_name = (cp.name or "").strip()
+            if not normalized_name:
+                raise RuntimeError("角色姓名不能为空")
+            if normalized_name in char_map:
+                raise RuntimeError(f"角色姓名重复: {normalized_name}")
+
             character = Character(
                 project_id=project_id,
-                name=cp.name,
+                name=normalized_name,
                 appearance=cp.appearance,
                 personality=cp.personality,
                 costume=cp.costume,
             )
             db.add(character)
-            char_map[cp.name] = character
+            char_map[normalized_name] = character
         await db.flush()
+        publish_progress(project_id, "parse_progress", {"message": "角色创建完成，正在写入场景...", "percent": 82})
 
         # 持久化场景
+        max_duration = settings.video_provider_max_duration_seconds
         for i, sp in enumerate(scene_prompts):
             prompt_text = (sp.video_prompt or "").strip()
             if not prompt_text:
                 raise RuntimeError(f"第 {i + 1} 个场景缺少有效视频提示词")
 
-            duration_seconds = max(0.1, float(sp.duration_seconds))
+            duration_seconds = min(max(0.1, float(sp.duration_seconds)), max_duration)
             transition_hint = (sp.transition_hint or "crossfade").strip().lower()
             if transition_hint not in ALLOWED_TRANSITIONS:
                 logger.warning("场景 %d 的 transition_hint=%s 非法，已回退为 crossfade", i + 1, sp.transition_hint)
@@ -193,11 +220,16 @@ class ScriptParserService:
 
             # 从叙事分析中获取对应场景的元数据
             narrative = analysis.scenes[i] if i < len(analysis.scenes) else None
+            title = (sp.title or "").strip()
+            if not title and narrative:
+                title = (narrative.title or "").strip()
+            if not title:
+                title = f"场景 {i + 1}"
 
             scene = Scene(
                 project_id=project_id,
                 sequence_order=i,
-                title=sp.title,
+                title=title,
                 description=narrative.narrative if narrative else "",
                 video_prompt=prompt_text,
                 negative_prompt=sp.negative_prompt,
@@ -214,20 +246,39 @@ class ScriptParserService:
 
             # 关联角色
             if narrative:
-                for char_name in narrative.character_names:
+                linked_character_ids: set[str] = set()
+                for raw_char_name in narrative.character_names:
+                    char_name = (raw_char_name or "").strip()
                     if char_name in char_map:
-                        action = narrative.character_actions.get(char_name, "")
+                        character_id = char_map[char_name].id
+                        if character_id in linked_character_ids:
+                            continue
+
+                        action = ""
+                        if isinstance(raw_char_name, str):
+                            action = narrative.character_actions.get(raw_char_name, "")
+                        if not action:
+                            action = narrative.character_actions.get(char_name, "")
                         sc = SceneCharacter(
                             scene_id=scene.id,
-                            character_id=char_map[char_name].id,
+                            character_id=character_id,
                             action=action,
                         )
                         db.add(sc)
+                        linked_character_ids.add(character_id)
+
+            percent = 82 + round(((i + 1) / max(1, len(scene_prompts))) * 14)
+            publish_progress(
+                project_id,
+                "parse_progress",
+                {"message": f"正在写入场景 {i + 1}/{len(scene_prompts)}...", "percent": percent},
+            )
 
         # 更新项目状态
         project = (await db.execute(select(Project).where(Project.id == project_id))).scalar_one()
         project.status = "parsed"
         await db.flush()
+        publish_progress(project_id, "parse_progress", {"message": "正在收尾并更新项目状态...", "percent": 98})
 
         return ParseResult(
             character_count=len(char_map),
@@ -237,21 +288,38 @@ class ScriptParserService:
 
 def _extract_json(text: str) -> dict:
     """从 LLM 输出中提取 JSON（处理可能的 markdown 代码块包裹）"""
-    text = text.strip()
-    if text.startswith("```"):
-        # 去除 markdown 代码块
-        lines = text.split("\n")
-        # 跳过第一行（```json）和最后一行（```）
-        json_lines = []
-        in_block = False
-        for line in lines:
-            if line.strip().startswith("```") and not in_block:
-                in_block = True
-                continue
-            if line.strip() == "```" and in_block:
-                break
-            if in_block:
-                json_lines.append(line)
-        text = "\n".join(json_lines)
+    value = (text or "").strip()
+    if not value:
+        raise ValueError("LLM 返回为空，无法提取 JSON")
 
-    return json.loads(text)
+    # 优先尝试直接解析，兼容已经是纯 JSON 的场景。
+    try:
+        parsed = json.loads(value)
+        if isinstance(parsed, dict):
+            return parsed
+    except json.JSONDecodeError:
+        pass
+
+    # 兼容 markdown 代码块（即使前后附带说明文字）。
+    fenced_blocks = re.findall(r"```(?:json)?\s*([\s\S]*?)```", value, flags=re.IGNORECASE)
+    for block in fenced_blocks:
+        candidate = block.strip()
+        if not candidate:
+            continue
+        try:
+            parsed = json.loads(candidate)
+            if isinstance(parsed, dict):
+                return parsed
+        except json.JSONDecodeError:
+            continue
+
+    # 兜底：提取首尾花括号中的对象片段，兼容“说明文字 + JSON + 说明文字”。
+    start = value.find("{")
+    end = value.rfind("}")
+    if start != -1 and end > start:
+        candidate = value[start:end + 1]
+        parsed = json.loads(candidate)
+        if isinstance(parsed, dict):
+            return parsed
+
+    raise ValueError("LLM 输出中未找到可解析的 JSON 对象")

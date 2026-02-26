@@ -1,36 +1,116 @@
-import { useEffect } from 'react'
+import { useCallback, useEffect } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import { Button, Space, Spin, Empty, Row, Col } from 'antd'
+import { Button, Space, Spin, Empty, App as AntdApp } from 'antd'
 import { PlayCircleOutlined } from '@ant-design/icons'
+import {
+  DndContext,
+  closestCenter,
+  KeyboardSensor,
+  PointerSensor,
+  useSensor,
+  useSensors,
+  type DragEndEvent,
+} from '@dnd-kit/core'
+import {
+  SortableContext,
+  sortableKeyboardCoordinates,
+  verticalListSortingStrategy,
+  useSortable,
+} from '@dnd-kit/sortable'
+import { CSS } from '@dnd-kit/utilities'
 import { useSceneStore } from '../../stores/sceneStore'
+import type { Scene } from '../../types/scene'
 import SceneCard from './SceneCard'
 import CharacterPanel from './CharacterPanel'
 import PageHeader from '../../components/PageHeader'
+import WorkflowSteps from '../../components/WorkflowSteps'
+import { getApiErrorMessage } from '../../utils/error'
+
+/** 可排序的场景卡片包装器 */
+function SortableSceneCard({ scene, projectId }: { scene: Scene; projectId: string }) {
+  const {
+    attributes,
+    listeners,
+    setNodeRef,
+    transform,
+    transition,
+    isDragging,
+  } = useSortable({ id: scene.id })
+
+  const style = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+    opacity: isDragging ? 0.5 : 1,
+  }
+
+  return (
+    <div ref={setNodeRef} style={style}>
+      <SceneCard
+        scene={scene}
+        projectId={projectId}
+        dragHandleProps={{ ...attributes, ...listeners }}
+      />
+    </div>
+  )
+}
 
 export default function SceneEditor() {
   const { id: projectId } = useParams<{ id: string }>()
   const navigate = useNavigate()
-  const { scenes, characters, loading, fetchScenes, fetchCharacters } = useSceneStore()
+  const { scenes, characters, loading, fetchScenes, fetchCharacters, reorderScenes } = useSceneStore()
+  const { message } = AntdApp.useApp()
+
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 8 } }),
+    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
+  )
 
   useEffect(() => {
     if (projectId) {
-      fetchScenes(projectId)
-      fetchCharacters(projectId)
+      Promise.all([fetchScenes(projectId), fetchCharacters(projectId)]).catch((error) => {
+        message.error(getApiErrorMessage(error, '加载场景或角色失败'))
+      })
     }
-  }, [projectId, fetchScenes, fetchCharacters])
+  }, [projectId, fetchScenes, fetchCharacters, message])
+
+  const handleDragEnd = useCallback(
+    (event: DragEndEvent) => {
+      const { active, over } = event
+      if (!over || active.id === over.id || !projectId) return
+
+      const oldIndex = scenes.findIndex((s) => s.id === active.id)
+      const newIndex = scenes.findIndex((s) => s.id === over.id)
+      if (oldIndex === -1 || newIndex === -1) return
+
+      // 构建新顺序的 scene ID 数组
+      const newSceneIds = scenes.map((s) => s.id)
+      const [moved] = newSceneIds.splice(oldIndex, 1)
+      newSceneIds.splice(newIndex, 0, moved!)
+
+      reorderScenes(projectId, newSceneIds).catch((error) => {
+        message.error(getApiErrorMessage(error, '场景排序失败'))
+      })
+    },
+    [scenes, projectId, reorderScenes, message],
+  )
 
   if (loading) {
-    return <Spin size="large" style={{ display: 'block', margin: '100px auto' }} />
+    return (
+      <div className="np-page-loading">
+        <Spin size="large" />
+      </div>
+    )
   }
 
   return (
-    <div>
+    <section className="np-page">
       <PageHeader
-        kicker="Scene Workshop"
+        kicker="场景工坊"
         title="场景编辑"
-        subtitle="逐条修订提示词、运镜与时长，确保最终视频叙事连贯。"
+        subtitle="拖拽排列场景顺序，修订提示词、运镜与时长，确保叙事连贯。"
         onBack={() => navigate(`/projects/${projectId}/script`)}
         backLabel="返回剧本"
+        navigation={<WorkflowSteps />}
         actions={(
           <Space>
             <Button
@@ -45,20 +125,41 @@ export default function SceneEditor() {
         )}
       />
 
-      {scenes.length === 0 ? (
-        <Empty description="暂无场景数据，请先解析剧本" />
-      ) : (
-        <Row gutter={16}>
-          <Col xs={24} lg={16}>
-            {scenes.map((scene) => (
-              <SceneCard key={scene.id} scene={scene} projectId={projectId!} />
-            ))}
-          </Col>
-          <Col xs={24} lg={8}>
-            <CharacterPanel characters={characters} />
-          </Col>
-        </Row>
-      )}
-    </div>
+      <div className="np-scene-editor-layout">
+        {scenes.length === 0 ? (
+          <div className="np-scene-empty">
+            <Empty description="暂无场景数据，请先解析剧本" />
+          </div>
+        ) : (
+          <>
+            <section className="np-scene-column np-scene-column-main">
+              <div className="np-scene-column-scroll">
+                <DndContext
+                  sensors={sensors}
+                  collisionDetection={closestCenter}
+                  onDragEnd={handleDragEnd}
+                >
+                  <SortableContext
+                    items={scenes.map((s) => s.id)}
+                    strategy={verticalListSortingStrategy}
+                  >
+                    {scenes.map((scene) => (
+                      <SortableSceneCard
+                        key={scene.id}
+                        scene={scene}
+                        projectId={projectId!}
+                      />
+                    ))}
+                  </SortableContext>
+                </DndContext>
+              </div>
+            </section>
+            <aside className="np-scene-column np-scene-column-side">
+              <CharacterPanel characters={characters} />
+            </aside>
+          </>
+        )}
+      </div>
+    </section>
   )
 }

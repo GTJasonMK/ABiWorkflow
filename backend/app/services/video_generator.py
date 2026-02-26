@@ -11,7 +11,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.config import settings
+from app.config import resolve_runtime_path, settings
 from app.models import Scene, SceneCharacter, VideoClip
 from app.services.progress import publish_progress
 from app.video_providers.base import VideoGenerateRequest, VideoProvider
@@ -30,7 +30,7 @@ class VideoGeneratorService:
         task_timeout_seconds: float | None = None,
     ):
         self._provider = provider
-        self._output_dir = Path(output_dir or settings.video_output_dir)
+        self._output_dir = resolve_runtime_path(output_dir or settings.video_output_dir)
         self._output_dir.mkdir(parents=True, exist_ok=True)
         self._poll_interval_seconds = max(0.1, poll_interval_seconds or settings.video_poll_interval_seconds)
         self._task_timeout_seconds = max(1.0, task_timeout_seconds or settings.video_task_timeout_seconds)
@@ -58,9 +58,9 @@ class VideoGeneratorService:
         return None
 
     @staticmethod
-    def _seed_for(scene: Scene, clip_order: int) -> int:
+    def _seed_for(scene: Scene, clip_order: int, candidate_index: int = 0) -> int:
         """为场景片段生成稳定随机种子，降低多次生成结果漂移。"""
-        raw = f"{scene.project_id}:{scene.id}:{clip_order}"
+        raw = f"{scene.project_id}:{scene.id}:{clip_order}:{candidate_index}"
         digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()
         return int(digest[:8], 16)
 
@@ -106,6 +106,7 @@ class VideoGeneratorService:
 
         # 重试前清理旧片段，避免重复拼接
         await db.execute(delete(VideoClip).where(VideoClip.scene_id == scene_with_relations.id))
+        scene_with_relations.status = "generating"
         await db.flush()
 
         reference_image_url = self._pick_reference_image(scene_with_relations)
@@ -118,7 +119,9 @@ class VideoGeneratorService:
                 status = await self._wait_for_completion(task_id)
 
                 if status.status.lower() == "completed":
-                    output_path = self._output_dir / f"{scene_with_relations.id}_{idx}_{task_id}.mp4"
+                    project_dir = self._output_dir / scene_with_relations.project_id
+                    project_dir.mkdir(parents=True, exist_ok=True)
+                    output_path = project_dir / f"{scene_with_relations.id}_{idx}_{task_id}.mp4"
                     local_file = await self._provider.download(task_id, output_path)
                     clip = VideoClip(
                         scene_id=scene_with_relations.id,
@@ -157,11 +160,106 @@ class VideoGeneratorService:
 
         return clips
 
+    async def generate_candidates(
+        self,
+        scene: Scene,
+        candidate_count: int,
+        db: AsyncSession,
+    ) -> list[VideoClip]:
+        """为场景生成多个候选视频（不清理旧片段，追加新候选）。"""
+        # 重新加载场景与角色关联
+        stmt = (
+            select(Scene)
+            .where(Scene.id == scene.id)
+            .options(selectinload(Scene.characters).selectinload(SceneCharacter.character))
+        )
+        scene_with_relations = (await db.execute(stmt)).scalar_one()
+
+        # 查询该场景已有的最大 candidate_index
+        existing_clips = (await db.execute(
+            select(VideoClip).where(VideoClip.scene_id == scene_with_relations.id)
+        )).scalars().all()
+        has_existing = len(existing_clips) > 0
+        max_candidate = max((c.candidate_index for c in existing_clips), default=-1)
+
+        reference_image_url = self._pick_reference_image(scene_with_relations)
+        durations = self._split_durations(
+            scene_with_relations.duration_seconds,
+            self._provider.max_duration_seconds,
+        )
+        all_new_clips: list[VideoClip] = []
+
+        for candidate_offset in range(candidate_count):
+            candidate_idx = max_candidate + 1 + candidate_offset
+            # 首批候选中第一个自动选中（仅当场景之前没有任何 clip 时）
+            auto_select = (not has_existing) and (candidate_offset == 0)
+
+            for clip_order, duration in enumerate(durations):
+                req = VideoGenerateRequest(
+                    prompt=scene_with_relations.video_prompt or "",
+                    duration_seconds=duration,
+                    negative_prompt=scene_with_relations.negative_prompt,
+                    reference_image_url=reference_image_url,
+                    seed=self._seed_for(scene_with_relations, clip_order, candidate_idx),
+                )
+
+                try:
+                    task_id = await self._provider.generate(req)
+                    status = await self._wait_for_completion(task_id)
+
+                    if status.status.lower() == "completed":
+                        project_dir = self._output_dir / scene_with_relations.project_id
+                        project_dir.mkdir(parents=True, exist_ok=True)
+                        output_path = project_dir / f"{scene_with_relations.id}_{clip_order}_c{candidate_idx}_{task_id}.mp4"
+                        local_file = await self._provider.download(task_id, output_path)
+                        clip = VideoClip(
+                            scene_id=scene_with_relations.id,
+                            clip_order=clip_order,
+                            candidate_index=candidate_idx,
+                            is_selected=auto_select,
+                            file_path=str(local_file),
+                            duration_seconds=req.duration_seconds,
+                            provider_task_id=task_id,
+                            status="completed",
+                        )
+                    else:
+                        clip = VideoClip(
+                            scene_id=scene_with_relations.id,
+                            clip_order=clip_order,
+                            candidate_index=candidate_idx,
+                            is_selected=False,
+                            duration_seconds=req.duration_seconds,
+                            provider_task_id=task_id,
+                            status="failed",
+                            error_message=status.error_message or f"任务状态: {status.status}",
+                        )
+                except Exception as e:
+                    logger.error(
+                        "场景 %s 候选 %d 片段 %d 生成失败: %s",
+                        scene_with_relations.id, candidate_idx, clip_order, e,
+                    )
+                    clip = VideoClip(
+                        scene_id=scene_with_relations.id,
+                        clip_order=clip_order,
+                        candidate_index=candidate_idx,
+                        is_selected=False,
+                        duration_seconds=duration,
+                        status="failed",
+                        error_message=str(e),
+                    )
+
+                db.add(clip)
+                all_new_clips.append(clip)
+
+        await db.flush()
+        return all_new_clips
+
     async def generate_all(self, project_id: str, db: AsyncSession) -> None:
         """批量生成项目所有场景的视频"""
         stmt = (
             select(Scene)
-            .where(Scene.project_id == project_id, Scene.status.in_(["pending", "failed"]))
+            # 兼容异常中断后遗留的 generating 状态，允许后续重跑恢复。
+            .where(Scene.project_id == project_id, Scene.status.in_(["pending", "failed", "generating"]))
             .options(selectinload(Scene.characters).selectinload(SceneCharacter.character))
             .order_by(Scene.sequence_order)
         )

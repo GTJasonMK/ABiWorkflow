@@ -8,7 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.llm.base import LLMAdapter, LLMResponse, Message
-from app.models import Character, Project, Scene
+from app.models import Character, CompositionTask, Project, Scene
 from app.services.script_parser import ScriptParserService
 
 
@@ -95,23 +95,53 @@ async def test_parse_service_should_not_commit_implicitly(db_session: AsyncSessi
     db_session.add(old_scene)
     await db_session.commit()
 
+    # rollback() 会将所有 ORM 对象标记为 expired，
+    # 之后同步访问 project.id 会触发延迟加载并在异步上下文中抛出 MissingGreenlet。
+    # 因此必须在 rollback 之前缓存 project_id。
+    project_id = project.id
+
     parser = ScriptParserService(FakeParserLLM())
-    await parser.parse_script(project.id, project.script_text or "", db_session)
+    await parser.parse_script(project_id, project.script_text or "", db_session)
 
     # 不提交直接回滚，应恢复到解析前状态（旧场景仍在，未留下新角色/新场景）。
     await db_session.rollback()
 
     scenes = (await db_session.execute(
-        select(Scene).where(Scene.project_id == project.id).order_by(Scene.sequence_order)
+        select(Scene).where(Scene.project_id == project_id).order_by(Scene.sequence_order)
     )).scalars().all()
     characters = (await db_session.execute(
-        select(Character).where(Character.project_id == project.id)
+        select(Character).where(Character.project_id == project_id)
     )).scalars().all()
     restored_project = (await db_session.execute(
-        select(Project).where(Project.id == project.id)
+        select(Project).where(Project.id == project_id)
     )).scalar_one()
 
     assert len(scenes) == 1
     assert scenes[0].title == "旧场景"
     assert len(characters) == 0
     assert restored_project.status == "parsing"
+
+
+@pytest.mark.asyncio
+async def test_parse_service_should_mark_existing_compositions_stale(db_session: AsyncSession):
+    project = Project(name="解析成片失效测试", status="parsing", script_text="一段测试剧本")
+    db_session.add(project)
+    await db_session.flush()
+
+    old_composition = CompositionTask(
+        project_id=project.id,
+        output_path="./outputs/compositions/old.mp4",
+        duration_seconds=5.0,
+        status="completed",
+    )
+    db_session.add(old_composition)
+    await db_session.commit()
+
+    parser = ScriptParserService(FakeParserLLM())
+    await parser.parse_script(project.id, project.script_text or "", db_session)
+    await db_session.commit()
+
+    refreshed_composition = (await db_session.execute(
+        select(CompositionTask).where(CompositionTask.id == old_composition.id)
+    )).scalar_one()
+    assert refreshed_composition.status == "stale"

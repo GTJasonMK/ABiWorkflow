@@ -7,6 +7,8 @@ interface PageHeaderProps {
   title: string
   subtitle?: string
   actions?: ReactNode
+  /** 返回按钮右侧的导航区域（如工作流步骤条） */
+  navigation?: ReactNode
   onBack?: () => void
   backLabel?: string
 }
@@ -16,6 +18,7 @@ export default function PageHeader({
   title,
   subtitle,
   actions,
+  navigation,
   onBack,
   backLabel = '返回',
 }: PageHeaderProps) {
@@ -23,10 +26,15 @@ export default function PageHeader({
     <header className="np-page-header">
       <div>
         {kicker && <p className="np-kicker">{kicker}</p>}
-        {onBack && (
-          <Button icon={<ArrowLeftOutlined />} onClick={onBack} style={{ marginBottom: 8 }}>
-            {backLabel}
-          </Button>
+        {(onBack || navigation) && (
+          <div className="np-page-nav-row">
+            {onBack && (
+              <Button icon={<ArrowLeftOutlined />} onClick={onBack}>
+                {backLabel}
+              </Button>
+            )}
+            {navigation && <div className="np-page-nav-slot">{navigation}</div>}
+          </div>
         )}
         <h2 className="np-page-title">{title}</h2>
         {subtitle && <p className="np-page-subtitle">{subtitle}</p>}

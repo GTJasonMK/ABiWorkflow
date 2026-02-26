@@ -1,13 +1,19 @@
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
-import { ConfigProvider } from 'antd'
+import { ConfigProvider, App as AntdApp } from 'antd'
 import type { ThemeConfig } from 'antd'
 import zhCN from 'antd/locale/zh_CN'
 import AppLayout from './components/Layout'
+import Dashboard from './pages/Dashboard'
 import ProjectList from './pages/ProjectList'
 import ScriptInput from './pages/ScriptInput'
 import SceneEditor from './pages/SceneEditor'
 import VideoGeneration from './pages/VideoGeneration'
 import CompositionPreview from './pages/CompositionPreview'
+import TaskHub from './pages/TaskHub'
+import Guide from './pages/Guide'
+import AssetsLibrary from './pages/Assets'
+import SystemSettings from './pages/SystemSettings'
+import { getDefaultHomePath } from './preferences'
 
 const newsprintTheme: ThemeConfig = {
   token: {
@@ -58,20 +64,29 @@ const newsprintTheme: ThemeConfig = {
 }
 
 function App() {
+  const homePath = getDefaultHomePath()
+
   return (
     <ConfigProvider locale={zhCN} theme={newsprintTheme}>
-      <BrowserRouter>
-        <Routes>
-          <Route path="/" element={<AppLayout />}>
-            <Route index element={<Navigate to="/projects" replace />} />
-            <Route path="projects" element={<ProjectList />} />
-            <Route path="projects/:id/script" element={<ScriptInput />} />
-            <Route path="projects/:id/scenes" element={<SceneEditor />} />
-            <Route path="projects/:id/generate" element={<VideoGeneration />} />
-            <Route path="projects/:id/compose" element={<CompositionPreview />} />
-          </Route>
-        </Routes>
-      </BrowserRouter>
+      <AntdApp>
+        <BrowserRouter>
+          <Routes>
+            <Route path="/" element={<AppLayout />}>
+              <Route index element={<Navigate to={homePath} replace />} />
+              <Route path="dashboard" element={<Dashboard />} />
+              <Route path="projects" element={<ProjectList />} />
+              <Route path="projects/:id/script" element={<ScriptInput />} />
+              <Route path="projects/:id/scenes" element={<SceneEditor />} />
+              <Route path="projects/:id/generate" element={<VideoGeneration />} />
+              <Route path="projects/:id/compose" element={<CompositionPreview />} />
+              <Route path="tasks" element={<TaskHub />} />
+              <Route path="assets" element={<AssetsLibrary />} />
+              <Route path="settings" element={<SystemSettings />} />
+              <Route path="guide" element={<Guide />} />
+            </Route>
+          </Routes>
+        </BrowserRouter>
+      </AntdApp>
     </ConfigProvider>
   )
 }

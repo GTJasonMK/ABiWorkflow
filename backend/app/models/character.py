@@ -21,6 +21,7 @@ class Character(Base):
     personality: Mapped[str | None] = mapped_column(Text, nullable=True)
     costume: Mapped[str | None] = mapped_column(Text, nullable=True)
     reference_image_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    portrait_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
 

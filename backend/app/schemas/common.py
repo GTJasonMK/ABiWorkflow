@@ -22,3 +22,4 @@ class PaginatedResponse(BaseModel, Generic[T]):
     total: int
     page: int
     page_size: int
+    stats: dict[str, int] | None = None

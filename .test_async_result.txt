@@ -1,0 +1,108 @@
+============================= test session starts =============================
+collecting ... collected 12 items
+
+backend\tests\test_api\test_async_tasks.py::test_parse_async_should_queue_task PASSED [  8%]
+backend\tests\test_api\test_async_tasks.py::test_generate_async_should_queue_task PASSED [ 16%]
+backend\tests\test_api\test_async_tasks.py::test_generate_async_should_not_queue_when_no_scene_needs_regeneration PASSED [ 25%]
+backend\tests\test_api\test_async_tasks.py::test_compose_async_should_queue_task PASSED [ 33%]
+backend\tests\test_api\test_async_tasks.py::test_task_status_endpoint_should_return_result PASSED [ 41%]
+backend\tests\test_api\test_async_tasks.py::test_parse_async_should_fallback_to_sync_when_worker_unavailable PASSED [ 50%]
+backend\tests\test_api\test_async_tasks.py::test_generate_async_should_fallback_to_sync_when_worker_unavailable PASSED [ 58%]
+backend\tests\test_api\test_async_tasks.py::test_compose_async_should_fallback_to_sync_when_worker_unavailable PASSED [ 66%]
+backend\tests\test_api\test_async_tasks.py::test_run_parse_should_restore_status_when_llm_init_failed FAILED [ 75%]
+backend\tests\test_api\test_async_tasks.py::test_parse_task_wrapper_should_restore_status_when_run_parse_failed_early FAILED [ 83%]
+backend\tests\test_api\test_async_tasks.py::test_generate_task_wrapper_should_restore_status_when_run_generate_failed_early FAILED [ 91%]
+backend\tests\test_api\test_async_tasks.py::test_compose_task_wrapper_should_restore_status_when_run_compose_failed_early FAILED [100%]
+
+================================== FAILURES ===================================
+__________ test_run_parse_should_restore_status_when_llm_init_failed __________
+backend\.venv\Lib\site-packages\_pytest\monkeypatch.py:92: in annotated_getattr
+    obj = getattr(obj, name)
+          ^^^^^^^^^^^^^^^^^^
+E   AttributeError: module 'app.tasks.parse_tasks' has no attribute 'create_llm_adapter'
+
+The above exception was the direct cause of the following exception:
+backend\tests\test_api\test_async_tasks.py:326: in test_run_parse_should_restore_status_when_llm_init_failed
+    monkeypatch.setattr("app.tasks.parse_tasks.create_llm_adapter", _raise_init_error)
+backend\.venv\Lib\site-packages\_pytest\monkeypatch.py:106: in derive_importpath
+    annotated_getattr(target, attr, ann=module)
+backend\.venv\Lib\site-packages\_pytest\monkeypatch.py:94: in annotated_getattr
+    raise AttributeError(
+E   AttributeError: 'module' object at app.tasks.parse_tasks has no attribute 'create_llm_adapter'
+__ test_parse_task_wrapper_should_restore_status_when_run_parse_failed_early __
+backend\tests\test_api\test_async_tasks.py:356: in test_parse_task_wrapper_should_restore_status_when_run_parse_failed_early
+    assert project.status == "draft"
+E   AssertionError: assert 'parsing' == 'draft'
+E     
+E     - draft
+E     + parsing
+_ test_generate_task_wrapper_should_restore_status_when_run_generate_failed_early _
+backend\tests\test_api\test_async_tasks.py:377: in test_generate_task_wrapper_should_restore_status_when_run_generate_failed_early
+    await asyncio.to_thread(generate_videos_task.run, project.id, "parsed")
+C:\Users\28367\AppData\Roaming\uv\python\cpython-3.13-windows-x86_64-none\Lib\asyncio\threads.py:25: in to_thread
+    return await loop.run_in_executor(None, func_call)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+C:\Users\28367\AppData\Roaming\uv\python\cpython-3.13-windows-x86_64-none\Lib\concurrent\futures\thread.py:59: in run
+    result = self.fn(*self.args, **self.kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+backend\app\tasks\generate_tasks.py:22: in generate_videos_task
+    result = run_async_in_new_loop(_run_generate(project_id, previous_status, force_regenerate))
+                                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   TypeError: test_generate_task_wrapper_should_restore_status_when_run_generate_failed_early.<locals>.fake_run_generate() takes 2 positional arguments but 3 were given
+---------------------------- Captured stdout call -----------------------------
+2026-02-27 01:55:04 [ERROR] app.tasks.generate_tasks: 视频生成任务失败: project=815fae6e-1ffc-4f63-9ca0-a3f01dd2c20d
+Traceback (most recent call last):
+  File "E:\Code\AbiWorkflow\backend\app\tasks\generate_tasks.py", line 22, in generate_videos_task
+    result = run_async_in_new_loop(_run_generate(project_id, previous_status, force_regenerate))
+                                   ~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+TypeError: test_generate_task_wrapper_should_restore_status_when_run_generate_failed_early.<locals>.fake_run_generate() takes 2 positional arguments but 3 were given
+------------------------------ Captured log call ------------------------------
+ERROR    app.tasks.generate_tasks:generate_tasks.py:34 视频生成任务失败: project=815fae6e-1ffc-4f63-9ca0-a3f01dd2c20d
+Traceback (most recent call last):
+  File "E:\Code\AbiWorkflow\backend\app\tasks\generate_tasks.py", line 22, in generate_videos_task
+    result = run_async_in_new_loop(_run_generate(project_id, previous_status, force_regenerate))
+                                   ~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+TypeError: test_generate_task_wrapper_should_restore_status_when_run_generate_failed_early.<locals>.fake_run_generate() takes 2 positional arguments but 3 were given
+_ test_compose_task_wrapper_should_restore_status_when_run_compose_failed_early _
+backend\tests\test_api\test_async_tasks.py:404: in test_compose_task_wrapper_should_restore_status_when_run_compose_failed_early
+    assert project.status == "parsed"
+E   AssertionError: assert 'composing' == 'parsed'
+E     
+E     - parsed
+E     + composing
+---------------------------- Captured stdout call -----------------------------
+2026-02-27 01:55:04 [ERROR] app.tasks.compose_tasks: 视频合成任务失败: project=ecae48cc-fe98-4de9-b30c-3a2b6804b778
+Traceback (most recent call last):
+  File "E:\Code\AbiWorkflow\backend\app\tasks\compose_tasks.py", line 21, in compose_video_task
+    result = run_async_in_new_loop(_run_compose(project_id, options, previous_status))
+  File "E:\Code\AbiWorkflow\backend\app\tasks\status_recovery.py", line 22, in run_async_in_new_loop
+    return loop.run_until_complete(awaitable)
+           ~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^
+  File "C:\Users\28367\AppData\Roaming\uv\python\cpython-3.13-windows-x86_64-none\Lib\asyncio\base_events.py", line 725, in run_until_complete
+    return future.result()
+           ~~~~~~~~~~~~~^^
+  File "E:\Code\AbiWorkflow\backend\tests\test_api\test_async_tasks.py", line 396, in fake_run_compose
+    raise RuntimeError("compose wrapper failed early")
+RuntimeError: compose wrapper failed early
+------------------------------ Captured log call ------------------------------
+ERROR    app.tasks.compose_tasks:compose_tasks.py:33 视频合成任务失败: project=ecae48cc-fe98-4de9-b30c-3a2b6804b778
+Traceback (most recent call last):
+  File "E:\Code\AbiWorkflow\backend\app\tasks\compose_tasks.py", line 21, in compose_video_task
+    result = run_async_in_new_loop(_run_compose(project_id, options, previous_status))
+  File "E:\Code\AbiWorkflow\backend\app\tasks\status_recovery.py", line 22, in run_async_in_new_loop
+    return loop.run_until_complete(awaitable)
+           ~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^
+  File "C:\Users\28367\AppData\Roaming\uv\python\cpython-3.13-windows-x86_64-none\Lib\asyncio\base_events.py", line 725, in run_until_complete
+    return future.result()
+           ~~~~~~~~~~~~~^^
+  File "E:\Code\AbiWorkflow\backend\tests\test_api\test_async_tasks.py", line 396, in fake_run_compose
+    raise RuntimeError("compose wrapper failed early")
+RuntimeError: compose wrapper failed early
+=========================== short test summary info ===========================
+FAILED backend\tests\test_api\test_async_tasks.py::test_run_parse_should_restore_status_when_llm_init_failed
+FAILED backend\tests\test_api\test_async_tasks.py::test_parse_task_wrapper_should_restore_status_when_run_parse_failed_early
+FAILED backend\tests\test_api\test_async_tasks.py::test_generate_task_wrapper_should_restore_status_when_run_generate_failed_early
+FAILED backend\tests\test_api\test_async_tasks.py::test_compose_task_wrapper_should_restore_status_when_run_compose_failed_early
+======================== 4 failed, 8 passed in 18.88s =========================
+
+---STDERR---

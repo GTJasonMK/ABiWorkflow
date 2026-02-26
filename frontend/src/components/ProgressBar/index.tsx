@@ -7,6 +7,9 @@ const { Text } = Typography
 interface Props {
   lastMessage: ProgressMessage | null
   connected: boolean
+  active?: boolean
+  activeText?: string
+  idleText?: string
 }
 
 /** 从消息类型推断状态 */
@@ -17,11 +20,19 @@ function getStepStatus(type: string): 'process' | 'finish' | 'error' | 'wait' {
   return 'wait'
 }
 
-export default function ProgressBar({ lastMessage, connected }: Props) {
+export default function ProgressBar({
+  lastMessage,
+  connected,
+  active = false,
+  activeText = '任务执行中...',
+  idleText = '等待中...',
+}: Props) {
   const latestData = lastMessage?.data ?? {}
   const percent = (latestData.percent as number) ?? 0
   const message = (latestData.message as string) ?? ''
-  const status = lastMessage ? getStepStatus(lastMessage.type) : 'wait'
+  const status = lastMessage ? getStepStatus(lastMessage.type) : active ? 'process' : 'wait'
+  const displayText = message || (active ? activeText : idleText)
+  const showIndeterminate = active && percent <= 0
 
   return (
     <div className="np-progress-shell">
@@ -29,8 +40,8 @@ export default function ProgressBar({ lastMessage, connected }: Props) {
         {status === 'process' && <LoadingOutlined spin />}
         {status === 'finish' && <CheckCircleOutlined style={{ color: '#52c41a' }} />}
         {status === 'error' && <CloseCircleOutlined style={{ color: '#ff4d4f' }} />}
-        <Text strong>{message || '等待中...'}</Text>
-        {!connected && <Text type="secondary">（未连接）</Text>}
+        <Text strong>{displayText}</Text>
+        {!connected && <Text type="secondary">{active ? '（实时进度不可用，显示加载动画）' : '（未连接）'}</Text>}
       </div>
 
       {percent > 0 && (
@@ -40,6 +51,8 @@ export default function ProgressBar({ lastMessage, connected }: Props) {
           size="small"
         />
       )}
+
+      {showIndeterminate && <div className="np-progress-indeterminate" />}
     </div>
   )
 }

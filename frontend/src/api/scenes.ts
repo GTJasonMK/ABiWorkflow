@@ -1,4 +1,5 @@
 import client from './client'
+import { buildAsyncTaskQuery, type StartTaskOptions } from './taskParams'
 import type { ApiResponse } from '../types/api'
 import type { Scene, Character } from '../types/scene'
 
@@ -42,8 +43,37 @@ export async function updateCharacter(characterId: string, data: Partial<Charact
   return resp.data.data!
 }
 
+/** 为角色生成立绘 */
+export async function generatePortrait(characterId: string): Promise<Character> {
+  const resp = await client.post<ApiResponse<Character>>(
+    `/characters/${characterId}/portrait`,
+    {},
+    { timeout: 0 },
+  )
+  return resp.data.data!
+}
+
+export interface ParseQueuedResponse {
+  task_id: string
+  mode: 'async'
+  status: string
+}
+
+export interface ParseResultResponse {
+  character_count: number
+  scene_count: number
+}
+
 /** 解析剧本 */
-export async function parseScript(projectId: string): Promise<{ character_count: number; scene_count: number }> {
-  const resp = await client.post<ApiResponse<{ character_count: number; scene_count: number }>>(`/projects/${projectId}/parse`)
+export async function parseScript(
+  projectId: string,
+  options: StartTaskOptions = {},
+): Promise<ParseQueuedResponse | ParseResultResponse> {
+  const query = buildAsyncTaskQuery(options)
+  const resp = await client.post<ApiResponse<ParseQueuedResponse | ParseResultResponse>>(
+    `/projects/${projectId}/parse?${query}`,
+    {},
+    { timeout: 0 },
+  )
   return resp.data.data!
 }

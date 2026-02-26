@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from pathlib import Path
 
@@ -8,6 +9,8 @@ import edge_tts
 from app.config import settings
 
 logger = logging.getLogger(__name__)
+
+_TTS_CONCURRENCY = 4
 
 
 class AudioResult:
@@ -37,7 +40,7 @@ class TTSService:
         scenes: list[dict],
         output_dir: Path,
     ) -> dict[str, AudioResult]:
-        """为有台词的场景批量生成配音
+        """为有台词的场景并行生成配音
 
         Args:
             scenes: [{"id": str, "dialogue": str}, ...]
@@ -47,17 +50,38 @@ class TTSService:
             {scene_id: AudioResult} 映射
         """
         output_dir.mkdir(parents=True, exist_ok=True)
-        results: dict[str, AudioResult] = {}
 
+        pending: list[tuple[str, str, Path]] = []
         for scene in scenes:
             dialogue = scene.get("dialogue")
             if not dialogue or not dialogue.strip():
                 continue
-
             scene_id = scene["id"]
             audio_path = output_dir / f"{scene_id}.mp3"
-            result = await self.generate_audio(dialogue, audio_path)
-            results[scene_id] = result
+            pending.append((scene_id, dialogue, audio_path))
 
-        logger.info("批量 TTS 生成完成: %d 段配音", len(results))
+        if not pending:
+            return {}
+
+        semaphore = asyncio.Semaphore(_TTS_CONCURRENCY)
+
+        async def _gen(sid: str, text: str, path: Path) -> tuple[str, AudioResult]:
+            async with semaphore:
+                result = await self.generate_audio(text, path)
+                return sid, result
+
+        completed = await asyncio.gather(
+            *[_gen(sid, text, path) for sid, text, path in pending],
+            return_exceptions=True,
+        )
+
+        results: dict[str, AudioResult] = {}
+        for item in completed:
+            if isinstance(item, BaseException):
+                logger.warning("TTS 生成失败: %s", item)
+                continue
+            scene_id, audio_result = item
+            results[scene_id] = audio_result
+
+        logger.info("批量 TTS 生成完成: %d/%d 段配音", len(results), len(pending))
         return results

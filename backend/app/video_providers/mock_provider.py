@@ -6,6 +6,7 @@ from pathlib import Path
 
 from moviepy import ColorClip, CompositeVideoClip, TextClip
 
+from app.config import resolve_runtime_path
 from app.video_providers.base import VideoGenerateRequest, VideoProvider, VideoTaskStatus
 
 
@@ -13,7 +14,7 @@ class MockVideoProvider(VideoProvider):
     """Mock 视频提供者：使用 moviepy 生成带文字的纯色测试视频"""
 
     def __init__(self, output_dir: str = "./outputs/videos"):
-        self._output_dir = Path(output_dir)
+        self._output_dir = resolve_runtime_path(output_dir)
         self._output_dir.mkdir(parents=True, exist_ok=True)
         self._tasks: dict[str, dict] = {}
 

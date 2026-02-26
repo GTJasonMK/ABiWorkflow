@@ -1,0 +1,325 @@
+============================= test session starts =============================
+platform win32 -- Python 3.13.12, pytest-9.0.2, pluggy-1.6.0 -- E:\Code\AbiWorkflow\backend\.venv\Scripts\python.exe
+cachedir: .pytest_cache
+rootdir: E:\Code\AbiWorkflow\backend
+configfile: pyproject.toml
+plugins: anyio-4.12.1, asyncio-1.3.0, cov-7.0.0
+asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collecting ... collected 49 items
+
+backend\tests\test_api\test_pipeline_guards.py::test_parse_should_reject_when_project_is_generating PASSED [  2%]
+backend\tests\test_api\test_pipeline_guards.py::test_parse_should_allow_force_recover_when_project_is_stuck_parsing PASSED [  4%]
+backend\tests\test_api\test_pipeline_guards.py::test_generate_should_reject_when_project_is_generating PASSED [  6%]
+backend\tests\test_api\test_pipeline_guards.py::test_generate_should_reject_when_project_is_draft_even_if_scenes_ready PASSED [  8%]
+backend\tests\test_api\test_pipeline_guards.py::test_generate_should_allow_force_recover_when_project_is_stuck_generating PASSED [ 10%]
+backend\tests\test_api\test_pipeline_guards.py::test_generate_should_only_validate_prompts_for_pending_or_failed_scenes PASSED [ 12%]
+backend\tests\test_api\test_pipeline_guards.py::test_generate_should_treat_completed_scene_status_as_ready PASSED [ 14%]
+backend\tests\test_api\test_pipeline_guards.py::test_compose_should_reject_when_project_is_composing PASSED [ 16%]
+backend\tests\test_api\test_pipeline_guards.py::test_compose_should_allow_force_recover_when_project_is_stuck_composing PASSED [ 18%]
+backend\tests\test_api\test_pipeline_guards.py::test_compose_force_recover_should_not_restore_composing_when_async_submit_failed PASSED [ 20%]
+backend\tests\test_api\test_pipeline_guards.py::test_compose_should_accept_completed_scene_status_for_legacy_data PASSED [ 22%]
+backend\tests\test_api\test_pipeline_guards.py::test_compose_should_mark_previous_compositions_stale PASSED [ 24%]
+backend\tests\test_api\test_pipeline_guards.py::test_compose_should_validate_transition_duration PASSED [ 26%]
+backend\tests\test_api\test_pipeline_guards.py::test_update_scene_should_invalidate_clips_when_generation_fields_changed FAILED [ 28%]
+backend\tests\test_api\test_pipeline_guards.py::test_update_scene_should_not_invalidate_when_nullable_generation_fields_are_semantically_unchanged PASSED [ 30%]
+backend\tests\test_api\test_pipeline_guards.py::test_update_scene_should_reject_when_project_is_generating PASSED [ 32%]
+backend\tests\test_api\test_pipeline_guards.py::test_retry_scene_should_keep_project_parsed_when_other_scenes_are_pending PASSED [ 34%]
+backend\tests\test_api\test_pipeline_guards.py::test_retry_scene_should_preserve_completed_project_when_retry_failed PASSED [ 36%]
+backend\tests\test_api\test_pipeline_guards.py::test_retry_scene_should_mark_previous_compositions_stale_on_success PASSED [ 38%]
+backend\tests\test_api\test_pipeline_guards.py::test_retry_scene_should_mark_previous_compositions_stale_when_retry_failed PASSED [ 40%]
+backend\tests\test_api\test_pipeline_guards.py::test_retry_scene_should_keep_completed_scene_status_when_post_process_failed PASSED [ 42%]
+backend\tests\test_api\test_pipeline_guards.py::test_retry_scene_should_mark_scene_failed_when_provider_init_failed PASSED [ 44%]
+backend\tests\test_api\test_pipeline_guards.py::test_retry_scene_should_restore_ready_scene_when_provider_init_failed PASSED [ 46%]
+backend\tests\test_api\test_pipeline_guards.py::test_delete_scene_should_reject_when_project_is_generating PASSED [ 48%]
+backend\tests\test_api\test_pipeline_guards.py::test_reorder_scenes_should_reject_when_project_is_composing PASSED [ 51%]
+backend\tests\test_api\test_pipeline_guards.py::test_reorder_scenes_should_not_downgrade_when_order_unchanged PASSED [ 53%]
+backend\tests\test_api\test_pipeline_guards.py::test_update_character_reference_image_should_invalidate_related_scene_generation PASSED [ 55%]
+backend\tests\test_api\test_pipeline_guards.py::test_update_unreferenced_character_should_not_invalidate_project_outputs PASSED [ 57%]
+backend\tests\test_api\test_pipeline_guards.py::test_reorder_scenes_should_return_404_when_project_not_found PASSED [ 59%]
+backend\tests\test_api\test_pipeline_guards.py::test_reorder_scenes_should_require_full_scene_id_set PASSED [ 61%]
+backend\tests\test_api\test_pipeline_guards.py::test_delete_scene_should_compact_sequence_order_after_delete FAILED [ 63%]
+backend\tests\test_api\test_pipeline_guards.py::test_generate_should_keep_completed_status_when_nothing_to_regenerate PASSED [ 65%]
+backend\tests\test_api\test_pipeline_guards.py::test_generate_should_recover_failed_project_when_all_scenes_already_ready PASSED [ 67%]
+backend\tests\test_api\test_pipeline_guards.py::test_generate_should_recover_generating_project_when_all_scenes_already_ready PASSED [ 69%]
+backend\tests\test_api\test_pipeline_guards.py::test_generate_should_mark_previous_compositions_stale_when_regenerating PASSED [ 71%]
+backend\tests\test_api\test_pipeline_guards.py::test_generate_should_mark_previous_compositions_stale_when_regeneration_failed PASSED [ 73%]
+backend\tests\test_api\test_pipeline_guards.py::test_generate_async_submit_failed_should_not_mark_previous_compositions_stale PASSED [ 75%]
+backend\tests\test_api\test_pipeline_guards.py::test_generate_should_recover_stale_generating_scenes_after_interruption PASSED [ 77%]
+backend\tests\test_api\test_pipeline_guards.py::test_update_character_should_reject_when_project_is_generating PASSED [ 79%]
+backend\tests\test_api\test_pipeline_guards.py::test_update_character_should_reject_blank_name PASSED [ 81%]
+backend\tests\test_api\test_pipeline_guards.py::test_update_character_should_reject_duplicate_name PASSED [ 83%]
+backend\tests\test_api\test_pipeline_guards.py::test_update_scene_should_reject_blank_title PASSED [ 85%]
+backend\tests\test_api\test_pipeline_guards.py::test_update_scene_should_reject_invalid_transition_hint PASSED [ 87%]
+backend\tests\test_api\test_pipeline_guards.py::test_delete_project_should_reject_when_project_is_generating PASSED [ 89%]
+backend\tests\test_api\test_pipeline_guards.py::test_create_project_should_reject_blank_name PASSED [ 91%]
+backend\tests\test_api\test_pipeline_guards.py::test_update_project_should_reject_blank_name PASSED [ 93%]
+backend\tests\test_api\test_pipeline_guards.py::test_update_project_should_reject_when_project_is_parsing PASSED [ 95%]
+backend\tests\test_api\test_pipeline_guards.py::test_update_project_should_reset_to_draft_and_stale_compositions_when_script_changed PASSED [ 97%]
+backend\tests\test_api\test_pipeline_guards.py::test_update_project_should_keep_status_when_script_not_changed PASSED [100%]
+
+================================== FAILURES ===================================
+__ test_update_scene_should_invalidate_clips_when_generation_fields_changed ___
+
+client = <httpx.AsyncClient object at 0x000001D05ABD1FD0>
+db_session = <sqlalchemy.ext.asyncio.session.AsyncSession object at 0x000001D05ACCBD10>
+
+    @pytest.mark.asyncio
+    async def test_update_scene_should_invalidate_clips_when_generation_fields_changed(
+        client: AsyncClient,
+        db_session: AsyncSession,
+    ):
+        project = Project(name="场景更新失效测试", status="completed")
+        db_session.add(project)
+        await db_session.flush()
+    
+        scene = Scene(
+            project_id=project.id,
+            sequence_order=0,
+            title="场景一",
+            video_prompt="old prompt",
+            negative_prompt="old negative",
+            duration_seconds=5.0,
+            status="generated",
+        )
+        db_session.add(scene)
+        await db_session.flush()
+    
+        clip = VideoClip(
+            scene_id=scene.id,
+            clip_order=0,
+            file_path="./outputs/videos/old.mp4",
+            duration_seconds=5.0,
+            provider_task_id="task-old",
+            status="completed",
+        )
+        db_session.add(clip)
+        composition = CompositionTask(
+            project_id=project.id,
+            output_path="./outputs/compositions/old.mp4",
+            duration_seconds=5.0,
+            status="completed",
+        )
+        db_session.add(composition)
+        await db_session.commit()
+    
+        response = await client.put(
+            f"/api/scenes/{scene.id}",
+            json={
+                "video_prompt": "new prompt",
+                "duration_seconds": 8.0,
+            },
+        )
+        assert response.status_code == 200
+        assert response.json()["data"]["status"] == "pending"
+    
+        # API 在独立会话中提交了变更，测试会话的 identity map 持有旧对象（expire_on_commit=False），
+        # 需手动过期以使后续 select 从数据库读取最新值。
+        db_session.expire_all()
+    
+        clips = (await db_session.execute(
+>           select(VideoClip).where(VideoClip.scene_id == scene.id)
+                                                          ^^^^^^^^
+        )).scalars().all()
+
+backend\tests\test_api\test_pipeline_guards.py:506: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+backend\.venv\Lib\site-packages\sqlalchemy\orm\attributes.py:569: in __get__
+    return self.impl.get(state, dict_)  # type: ignore[no-any-return]
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+backend\.venv\Lib\site-packages\sqlalchemy\orm\attributes.py:1096: in get
+    value = self._fire_loader_callables(state, key, passive)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+backend\.venv\Lib\site-packages\sqlalchemy\orm\attributes.py:1126: in _fire_loader_callables
+    return state._load_expired(state, passive)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+backend\.venv\Lib\site-packages\sqlalchemy\orm\state.py:828: in _load_expired
+    self.manager.expired_attribute_loader(self, toload, passive)
+backend\.venv\Lib\site-packages\sqlalchemy\orm\loading.py:1674: in load_scalar_attributes
+    result = load_on_ident(
+backend\.venv\Lib\site-packages\sqlalchemy\orm\loading.py:510: in load_on_ident
+    return load_on_pk_identity(
+backend\.venv\Lib\site-packages\sqlalchemy\orm\loading.py:695: in load_on_pk_identity
+    session.execute(
+backend\.venv\Lib\site-packages\sqlalchemy\orm\session.py:2351: in execute
+    return self._execute_internal(
+backend\.venv\Lib\site-packages\sqlalchemy\orm\session.py:2249: in _execute_internal
+    result: Result[Any] = compile_state_cls.orm_execute_statement(
+backend\.venv\Lib\site-packages\sqlalchemy\orm\context.py:306: in orm_execute_statement
+    result = conn.execute(
+backend\.venv\Lib\site-packages\sqlalchemy\engine\base.py:1419: in execute
+    return meth(
+backend\.venv\Lib\site-packages\sqlalchemy\sql\elements.py:527: in _execute_on_connection
+    return connection._execute_clauseelement(
+backend\.venv\Lib\site-packages\sqlalchemy\engine\base.py:1641: in _execute_clauseelement
+    ret = self._execute_context(
+backend\.venv\Lib\site-packages\sqlalchemy\engine\base.py:1846: in _execute_context
+    return self._exec_single_context(
+backend\.venv\Lib\site-packages\sqlalchemy\engine\base.py:1986: in _exec_single_context
+    self._handle_dbapi_exception(
+backend\.venv\Lib\site-packages\sqlalchemy\engine\base.py:2366: in _handle_dbapi_exception
+    raise exc_info[1].with_traceback(exc_info[2])
+backend\.venv\Lib\site-packages\sqlalchemy\engine\base.py:1967: in _exec_single_context
+    self.dialect.do_execute(
+backend\.venv\Lib\site-packages\sqlalchemy\engine\default.py:952: in do_execute
+    cursor.execute(statement, parameters)
+backend\.venv\Lib\site-packages\sqlalchemy\dialects\sqlite\aiosqlite.py:182: in execute
+    self._adapt_connection._handle_exception(error)
+backend\.venv\Lib\site-packages\sqlalchemy\dialects\sqlite\aiosqlite.py:342: in _handle_exception
+    raise error
+backend\.venv\Lib\site-packages\sqlalchemy\dialects\sqlite\aiosqlite.py:159: in execute
+    _cursor: AsyncIODBAPICursor = self.await_(self._connection.cursor())  # type: ignore[arg-type] # noqa: E501
+                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+awaitable = <aiosqlite.context.Result object at 0x000001D05AC3D7E0>
+
+    def await_only(awaitable: Awaitable[_T]) -> _T:
+        """Awaits an async function in a sync method.
+    
+        The sync method must be inside a :func:`greenlet_spawn` context.
+        :func:`await_only` calls cannot be nested.
+    
+        :param awaitable: The coroutine to call.
+    
+        """
+        # this is called in the context greenlet while running fn
+        current = getcurrent()
+        if not getattr(current, "__sqlalchemy_greenlet_provider__", False):
+            _safe_cancel_awaitable(awaitable)
+    
+>           raise exc.MissingGreenlet(
+                "greenlet_spawn has not been called; can't call await_only() "
+                "here. Was IO attempted in an unexpected place?"
+            )
+E           sqlalchemy.exc.MissingGreenlet: greenlet_spawn has not been called; can't call await_only() here. Was IO attempted in an unexpected place? (Background on this error at: https://sqlalche.me/e/20/xd2s)
+
+backend\.venv\Lib\site-packages\sqlalchemy\util\_concurrency_py3k.py:123: MissingGreenlet
+________ test_delete_scene_should_compact_sequence_order_after_delete _________
+
+client = <httpx.AsyncClient object at 0x000001D0599ECE90>
+db_session = <sqlalchemy.ext.asyncio.session.AsyncSession object at 0x000001D05B737410>
+
+    @pytest.mark.asyncio
+    async def test_delete_scene_should_compact_sequence_order_after_delete(
+        client: AsyncClient,
+        db_session: AsyncSession,
+    ):
+        project = Project(name="删除后重排测试", status="parsed")
+        db_session.add(project)
+        await db_session.flush()
+    
+        scene_a = Scene(
+            project_id=project.id,
+            sequence_order=0,
+            title="场景A",
+            video_prompt="prompt A",
+            duration_seconds=5.0,
+            status="pending",
+        )
+        scene_b = Scene(
+            project_id=project.id,
+            sequence_order=1,
+            title="场景B",
+            video_prompt="prompt B",
+            duration_seconds=5.0,
+            status="pending",
+        )
+        scene_c = Scene(
+            project_id=project.id,
+            sequence_order=2,
+            title="场景C",
+            video_prompt="prompt C",
+            duration_seconds=5.0,
+            status="pending",
+        )
+        db_session.add_all([scene_a, scene_b, scene_c])
+        await db_session.commit()
+    
+        response = await client.delete(f"/api/scenes/{scene_b.id}")
+        assert response.status_code == 200
+    
+        # API 在独立会话中完成了删除和 sequence_order 压缩，需过期本会话缓存
+        db_session.expire_all()
+    
+        remaining = (await db_session.execute(
+>           select(Scene).where(Scene.project_id == project.id).order_by(Scene.sequence_order)
+                                                    ^^^^^^^^^^
+        )).scalars().all()
+
+backend\tests\test_api\test_pipeline_guards.py:1210: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+backend\.venv\Lib\site-packages\sqlalchemy\orm\attributes.py:569: in __get__
+    return self.impl.get(state, dict_)  # type: ignore[no-any-return]
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+backend\.venv\Lib\site-packages\sqlalchemy\orm\attributes.py:1096: in get
+    value = self._fire_loader_callables(state, key, passive)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+backend\.venv\Lib\site-packages\sqlalchemy\orm\attributes.py:1126: in _fire_loader_callables
+    return state._load_expired(state, passive)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+backend\.venv\Lib\site-packages\sqlalchemy\orm\state.py:828: in _load_expired
+    self.manager.expired_attribute_loader(self, toload, passive)
+backend\.venv\Lib\site-packages\sqlalchemy\orm\loading.py:1674: in load_scalar_attributes
+    result = load_on_ident(
+backend\.venv\Lib\site-packages\sqlalchemy\orm\loading.py:510: in load_on_ident
+    return load_on_pk_identity(
+backend\.venv\Lib\site-packages\sqlalchemy\orm\loading.py:695: in load_on_pk_identity
+    session.execute(
+backend\.venv\Lib\site-packages\sqlalchemy\orm\session.py:2351: in execute
+    return self._execute_internal(
+backend\.venv\Lib\site-packages\sqlalchemy\orm\session.py:2249: in _execute_internal
+    result: Result[Any] = compile_state_cls.orm_execute_statement(
+backend\.venv\Lib\site-packages\sqlalchemy\orm\context.py:306: in orm_execute_statement
+    result = conn.execute(
+backend\.venv\Lib\site-packages\sqlalchemy\engine\base.py:1419: in execute
+    return meth(
+backend\.venv\Lib\site-packages\sqlalchemy\sql\elements.py:527: in _execute_on_connection
+    return connection._execute_clauseelement(
+backend\.venv\Lib\site-packages\sqlalchemy\engine\base.py:1641: in _execute_clauseelement
+    ret = self._execute_context(
+backend\.venv\Lib\site-packages\sqlalchemy\engine\base.py:1846: in _execute_context
+    return self._exec_single_context(
+backend\.venv\Lib\site-packages\sqlalchemy\engine\base.py:1986: in _exec_single_context
+    self._handle_dbapi_exception(
+backend\.venv\Lib\site-packages\sqlalchemy\engine\base.py:2366: in _handle_dbapi_exception
+    raise exc_info[1].with_traceback(exc_info[2])
+backend\.venv\Lib\site-packages\sqlalchemy\engine\base.py:1967: in _exec_single_context
+    self.dialect.do_execute(
+backend\.venv\Lib\site-packages\sqlalchemy\engine\default.py:952: in do_execute
+    cursor.execute(statement, parameters)
+backend\.venv\Lib\site-packages\sqlalchemy\dialects\sqlite\aiosqlite.py:182: in execute
+    self._adapt_connection._handle_exception(error)
+backend\.venv\Lib\site-packages\sqlalchemy\dialects\sqlite\aiosqlite.py:342: in _handle_exception
+    raise error
+backend\.venv\Lib\site-packages\sqlalchemy\dialects\sqlite\aiosqlite.py:159: in execute
+    _cursor: AsyncIODBAPICursor = self.await_(self._connection.cursor())  # type: ignore[arg-type] # noqa: E501
+                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+awaitable = <aiosqlite.context.Result object at 0x000001D05ABE9A50>
+
+    def await_only(awaitable: Awaitable[_T]) -> _T:
+        """Awaits an async function in a sync method.
+    
+        The sync method must be inside a :func:`greenlet_spawn` context.
+        :func:`await_only` calls cannot be nested.
+    
+        :param awaitable: The coroutine to call.
+    
+        """
+        # this is called in the context greenlet while running fn
+        current = getcurrent()
+        if not getattr(current, "__sqlalchemy_greenlet_provider__", False):
+            _safe_cancel_awaitable(awaitable)
+    
+>           raise exc.MissingGreenlet(
+                "greenlet_spawn has not been called; can't call await_only() "
+                "here. Was IO attempted in an unexpected place?"
+            )
+E           sqlalchemy.exc.MissingGreenlet: greenlet_spawn has not been called; can't call await_only() here. Was IO attempted in an unexpected place? (Background on this error at: https://sqlalche.me/e/20/xd2s)
+
+backend\.venv\Lib\site-packages\sqlalchemy\util\_concurrency_py3k.py:123: MissingGreenlet
+=========================== short test summary info ===========================
+FAILED backend\tests\test_api\test_pipeline_guards.py::test_update_scene_should_invalidate_clips_when_generation_fields_changed
+FAILED backend\tests\test_api\test_pipeline_guards.py::test_delete_scene_should_compact_sequence_order_after_delete
+======================== 2 failed, 47 passed in 10.60s ========================

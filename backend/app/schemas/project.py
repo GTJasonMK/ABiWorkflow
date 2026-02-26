@@ -44,6 +44,7 @@ class ProjectListItem(BaseModel):
     description: str | None
     status: str
     scene_count: int = 0
+    character_count: int = 0
     created_at: datetime
     updated_at: datetime
 

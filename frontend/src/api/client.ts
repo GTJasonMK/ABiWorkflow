@@ -1,11 +1,16 @@
 import axios from 'axios'
+import { getApiBaseUrl } from '../runtime'
 
 const client = axios.create({
-  baseURL: '/api',
   timeout: 30000,
-  headers: {
-    'Content-Type': 'application/json',
-  },
+})
+
+client.interceptors.request.use((config) => {
+  // API 地址支持运行时切换（系统设置修改后当前会话立即生效）。
+  if (!config.baseURL) {
+    config.baseURL = getApiBaseUrl()
+  }
+  return config
 })
 
 client.interceptors.response.use(

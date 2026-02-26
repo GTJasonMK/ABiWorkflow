@@ -30,7 +30,7 @@ export default function OptionsPanel({ options, onChange }: Props) {
       </Form.Item>
       <Form.Item label="转场时长（秒）">
         <InputNumber
-          min={0.1}
+          min={0}
           max={2.0}
           step={0.1}
           value={options.transition_duration}

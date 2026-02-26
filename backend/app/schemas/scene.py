@@ -31,6 +31,39 @@ class SceneCharacterResponse(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class ClipSummary(BaseModel):
+    """场景视频片段统计摘要"""
+
+    total: int = 0
+    completed: int = 0
+    failed: int = 0
+
+
+class ClipBrief(BaseModel):
+    """视频片段简要信息"""
+
+    id: str
+    clip_order: int
+    candidate_index: int = 0
+    is_selected: bool = True
+    status: str
+    duration_seconds: float
+    error_message: str | None = None
+
+
+class CandidateClipResponse(BaseModel):
+    """候选片段详情（含媒体地址）"""
+
+    id: str
+    clip_order: int
+    candidate_index: int
+    is_selected: bool
+    status: str
+    duration_seconds: float
+    error_message: str | None = None
+    media_url: str | None = None
+
+
 class SceneResponse(BaseModel):
     """场景响应"""
 
@@ -49,6 +82,8 @@ class SceneResponse(BaseModel):
     transition_hint: str | None
     status: str
     characters: list[SceneCharacterResponse] = []
+    clip_summary: ClipSummary = Field(default_factory=ClipSummary)
+    clips: list[ClipBrief] = []
     created_at: datetime
     updated_at: datetime
 

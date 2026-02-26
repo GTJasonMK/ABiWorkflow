@@ -21,6 +21,7 @@ export interface ProjectListItem {
   description: string | null
   status: ProjectStatus
   scene_count: number
+  character_count: number
   created_at: string
   updated_at: string
 }

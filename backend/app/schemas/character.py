@@ -25,6 +25,7 @@ class CharacterResponse(BaseModel):
     personality: str | None
     costume: str | None
     reference_image_url: str | None
+    portrait_url: str | None
     created_at: datetime
     updated_at: datetime
 

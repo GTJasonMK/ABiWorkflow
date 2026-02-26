@@ -1,22 +1,83 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Button, Modal, Form, Input, Table, Tag, Space, Popconfirm, message } from 'antd'
-import { PlusOutlined, EditOutlined, DeleteOutlined, PlayCircleOutlined } from '@ant-design/icons'
-import type { ColumnsType } from 'antd/es/table'
+import { Button, Input, Modal, Form, Table, Tag, Space, Popconfirm, Tooltip, App as AntdApp } from 'antd'
+import { PlusOutlined, EditOutlined, DeleteOutlined, RightOutlined, CopyOutlined } from '@ant-design/icons'
+import type { ColumnsType, TableProps } from 'antd/es/table'
+import type { SorterResult } from 'antd/es/table/interface'
 import { useProjectStore } from '../../stores/projectStore'
 import { STATUS_MAP } from '../../types/project'
 import type { ProjectListItem, ProjectStatus } from '../../types/project'
 import PageHeader from '../../components/PageHeader'
+import { getApiErrorMessage } from '../../utils/error'
+import { getTargetStepKey } from '../../utils/workflow'
+
+const ALL_STATUSES = Object.keys(STATUS_MAP) as ProjectStatus[]
 
 export default function ProjectList() {
   const navigate = useNavigate()
-  const { projects, total, page, loading, fetchProjects, createProject, deleteProject } = useProjectStore()
+  const {
+    projects, total, page, loading, stats,
+    fetchProjects, createProject, deleteProject, duplicateProject,
+  } = useProjectStore()
   const [createModalOpen, setCreateModalOpen] = useState(false)
   const [form] = Form.useForm()
+  const { message } = AntdApp.useApp()
+
+  // 搜索/筛选/排序的本地状态
+  const [keyword, setKeyword] = useState('')
+  const [selectedStatuses, setSelectedStatuses] = useState<ProjectStatus[]>([])
+  const [sortBy, setSortBy] = useState<string>('created_at')
+  const [sortOrder, setSortOrder] = useState<string>('desc')
+
+  // 防抖搜索
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  const doFetch = useCallback((overrides?: Record<string, unknown>) => {
+    const params = {
+      page: 1,
+      keyword: keyword.trim() || undefined,
+      status: selectedStatuses.length > 0 ? selectedStatuses.join(',') : undefined,
+      sort_by: sortBy,
+      sort_order: sortOrder,
+      ...overrides,
+    }
+    fetchProjects(params).catch((error) => {
+      message.error(getApiErrorMessage(error, '加载项目列表失败'))
+    })
+  }, [fetchProjects, keyword, selectedStatuses, sortBy, sortOrder, message])
 
   useEffect(() => {
-    fetchProjects()
-  }, [fetchProjects])
+    doFetch()
+    // 仅在首次挂载时执行
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  const handleSearch = (value: string) => {
+    setKeyword(value)
+    if (debounceRef.current) clearTimeout(debounceRef.current)
+    debounceRef.current = setTimeout(() => {
+      doFetch({ keyword: value.trim() || undefined, page: 1 })
+    }, 300)
+  }
+
+  const handleStatusToggle = (status: ProjectStatus) => {
+    const next = selectedStatuses.includes(status)
+      ? selectedStatuses.filter((s) => s !== status)
+      : [...selectedStatuses, status]
+    setSelectedStatuses(next)
+    doFetch({ status: next.length > 0 ? next.join(',') : undefined, page: 1 })
+  }
+
+  const handleTableChange: TableProps<ProjectListItem>['onChange'] = (_pagination, _filters, sorter) => {
+    const s = sorter as SorterResult<ProjectListItem>
+    if (s.columnKey && s.order) {
+      const newSortBy = s.columnKey as string
+      const newSortOrder = s.order === 'ascend' ? 'asc' : 'desc'
+      setSortBy(newSortBy)
+      setSortOrder(newSortOrder)
+      doFetch({ sort_by: newSortBy, sort_order: newSortOrder, page: 1 })
+    }
+  }
 
   const handleCreate = async () => {
     try {
@@ -26,28 +87,49 @@ export default function ProjectList() {
       form.resetFields()
       message.success('项目创建成功')
       navigate(`/projects/${project.id}/script`)
-    } catch {
-      // 表单校验失败
+    } catch (error) {
+      const maybeValidation = error as { errorFields?: unknown[] }
+      if (Array.isArray(maybeValidation?.errorFields) && maybeValidation.errorFields.length > 0) {
+        return
+      }
+      message.error(getApiErrorMessage(error, '项目创建失败'))
     }
   }
 
   const handleDelete = async (id: string) => {
-    await deleteProject(id)
-    message.success('项目已删除')
+    try {
+      await deleteProject(id)
+      message.success('项目已删除')
+    } catch (error) {
+      message.error(getApiErrorMessage(error, '项目删除失败'))
+    }
   }
 
-  const completedCount = projects.filter((project) => project.status === 'completed').length
-  const activeCount = projects.filter(
-    (project) => project.status === 'parsing' || project.status === 'generating' || project.status === 'composing',
-  ).length
+  const handleDuplicate = async (id: string) => {
+    try {
+      await duplicateProject(id)
+      message.success('项目已复制')
+    } catch (error) {
+      message.error(getApiErrorMessage(error, '项目复制失败'))
+    }
+  }
+
+  // KPI 使用后端返回的全局统计
+  const activeCount = (stats.parsing ?? 0) + (stats.generating ?? 0) + (stats.composing ?? 0)
+  const completedCount = stats.completed ?? 0
+  const totalAll = Object.values(stats).reduce((sum, n) => sum + n, 0)
 
   const columns: ColumnsType<ProjectListItem> = [
     {
       title: '项目名称',
       dataIndex: 'name',
       key: 'name',
+      sorter: true,
+      sortOrder: sortBy === 'name' ? (sortOrder === 'asc' ? 'ascend' : 'descend') : undefined,
+      ellipsis: true,
+      width: 200,
       render: (name: string, record) => (
-        <button type="button" className="np-project-link" onClick={() => navigate(`/projects/${record.id}/script`)}>
+        <button type="button" className="np-project-link" onClick={() => navigate(`/projects/${record.id}/${getTargetStepKey(record.status)}`)}>
           {name}
         </button>
       ),
@@ -62,51 +144,68 @@ export default function ProjectList() {
       title: '状态',
       dataIndex: 'status',
       key: 'status',
-      width: 100,
+      width: 90,
       render: (status: ProjectStatus) => {
         const info = STATUS_MAP[status]
         return <Tag className={`np-status-tag np-status-${status}`}>{info.label}</Tag>
       },
     },
     {
-      title: '场景数',
+      title: '场景',
       dataIndex: 'scene_count',
       key: 'scene_count',
-      width: 80,
+      width: 60,
       align: 'center',
     },
     {
-      title: '创建时间',
-      dataIndex: 'created_at',
-      key: 'created_at',
-      width: 180,
+      title: '角色',
+      dataIndex: 'character_count',
+      key: 'character_count',
+      width: 60,
+      align: 'center',
+    },
+    {
+      title: '更新时间',
+      dataIndex: 'updated_at',
+      key: 'updated_at',
+      width: 170,
+      sorter: true,
+      sortOrder: sortBy === 'updated_at' ? (sortOrder === 'asc' ? 'ascend' : 'descend') : undefined,
       render: (val: string) => new Date(val).toLocaleString('zh-CN'),
     },
     {
       title: '操作',
       key: 'actions',
-      width: 200,
+      width: 150,
+      fixed: 'right',
       render: (_, record) => (
-        <Space>
-          <Button
-            size="small"
-            icon={<EditOutlined />}
-            onClick={() => navigate(`/projects/${record.id}/script`)}
-          >
-            编辑
-          </Button>
-          {record.status === 'parsed' && (
+        <Space size={4}>
+          <Tooltip title="编辑剧本">
+            <Button
+              size="small"
+              icon={<EditOutlined />}
+              onClick={() => navigate(`/projects/${record.id}/script`)}
+            />
+          </Tooltip>
+          <Tooltip title="继续工作流">
             <Button
               size="small"
               type="primary"
-              icon={<PlayCircleOutlined />}
-              onClick={() => navigate(`/projects/${record.id}/scenes`)}
-            >
-              场景
-            </Button>
-          )}
+              icon={<RightOutlined />}
+              onClick={() => navigate(`/projects/${record.id}/${getTargetStepKey(record.status)}`)}
+            />
+          </Tooltip>
+          <Tooltip title="复制项目">
+            <Button
+              size="small"
+              icon={<CopyOutlined />}
+              onClick={() => handleDuplicate(record.id)}
+            />
+          </Tooltip>
           <Popconfirm title="确认删除此项目？" onConfirm={() => handleDelete(record.id)}>
-            <Button size="small" danger icon={<DeleteOutlined />} />
+            <Tooltip title="删除">
+              <Button size="small" danger icon={<DeleteOutlined />} />
+            </Tooltip>
           </Popconfirm>
         </Space>
       ),
@@ -114,9 +213,9 @@ export default function ProjectList() {
   ]
 
   return (
-    <div>
+    <section className="np-page">
       <PageHeader
-        kicker="Project Desk"
+        kicker="项目总览"
         title="项目工作台"
         subtitle="管理剧本生产线：创建项目、追踪状态、进入编辑。"
         actions={(
@@ -126,35 +225,64 @@ export default function ProjectList() {
         )}
       />
 
-      <div className="np-kpi-grid">
-        <article className="np-kpi-card">
-          <p className="np-kpi-label">Total Projects</p>
-          <p className="np-kpi-value">{total}</p>
-        </article>
-        <article className="np-kpi-card">
-          <p className="np-kpi-label">In Progress</p>
-          <p className="np-kpi-value">{activeCount}</p>
-        </article>
-        <article className="np-kpi-card">
-          <p className="np-kpi-label">Completed</p>
-          <p className="np-kpi-value">{completedCount}</p>
-        </article>
-      </div>
+      <div className="np-page-scroll">
+        <div className="np-kpi-grid">
+          <article className="np-kpi-card">
+            <p className="np-kpi-label">项目总数</p>
+            <p className="np-kpi-value">{totalAll}</p>
+          </article>
+          <article className="np-kpi-card">
+            <p className="np-kpi-label">进行中</p>
+            <p className="np-kpi-value">{activeCount}</p>
+          </article>
+          <article className="np-kpi-card">
+            <p className="np-kpi-label">已完成</p>
+            <p className="np-kpi-value">{completedCount}</p>
+          </article>
+        </div>
 
-      <Table
-        rowKey="id"
-        columns={columns}
-        dataSource={projects}
-        loading={loading}
-        bordered
-        pagination={{
-          current: page,
-          total,
-          pageSize: 20,
-          onChange: (p) => fetchProjects(p),
-          showTotal: (t) => `共 ${t} 个项目`,
-        }}
-      />
+        {/* 搜索栏和状态筛选 */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 16, flexWrap: 'wrap' }}>
+          <Input.Search
+            placeholder="搜索项目名称"
+            allowClear
+            value={keyword}
+            onChange={(e) => handleSearch(e.target.value)}
+            onSearch={(v) => handleSearch(v)}
+            style={{ width: 260 }}
+          />
+          <Space size={4} wrap>
+            {ALL_STATUSES.map((s) => (
+              <Tag.CheckableTag
+                key={s}
+                checked={selectedStatuses.includes(s)}
+                onChange={() => handleStatusToggle(s)}
+              >
+                {STATUS_MAP[s].label}
+              </Tag.CheckableTag>
+            ))}
+          </Space>
+        </div>
+
+        <Table
+          rowKey="id"
+          columns={columns}
+          dataSource={projects}
+          loading={loading}
+          bordered
+          scroll={{ x: 900 }}
+          onChange={handleTableChange}
+          pagination={{
+            current: page,
+            total,
+            pageSize: 20,
+            onChange: (p) => {
+              doFetch({ page: p })
+            },
+            showTotal: (t) => `共 ${t} 个项目`,
+          }}
+        />
+      </div>
 
       <Modal
         title="新建项目"
@@ -173,6 +301,6 @@ export default function ProjectList() {
           </Form.Item>
         </Form>
       </Modal>
-    </div>
+    </section>
   )
 }

@@ -11,8 +11,8 @@ import VideoGeneration from './pages/VideoGeneration'
 import CompositionPreview from './pages/CompositionPreview'
 import TaskHub from './pages/TaskHub'
 import Guide from './pages/Guide'
-import AssetsLibrary from './pages/Assets'
 import SystemSettings from './pages/SystemSettings'
+import OperationsCenter from './pages/OperationsCenter'
 import { getDefaultHomePath } from './preferences'
 
 const newsprintTheme: ThemeConfig = {
@@ -80,7 +80,7 @@ function App() {
               <Route path="projects/:id/generate" element={<VideoGeneration />} />
               <Route path="projects/:id/compose" element={<CompositionPreview />} />
               <Route path="tasks" element={<TaskHub />} />
-              <Route path="assets" element={<AssetsLibrary />} />
+              <Route path="operations" element={<OperationsCenter />} />
               <Route path="settings" element={<SystemSettings />} />
               <Route path="guide" element={<Guide />} />
             </Route>

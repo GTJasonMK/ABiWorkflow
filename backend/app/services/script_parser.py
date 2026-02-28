@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import json
 import logging
-import re
 
 from pydantic import BaseModel
 from sqlalchemy import select
@@ -11,9 +9,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.llm.base import LLMAdapter, Message
 from app.models import Character, Project, Scene, SceneCharacter
+from app.project_status import PROJECT_STATUS_PARSED
 from app.prompts.narrative_analysis import NARRATIVE_ANALYSIS_SYSTEM, NARRATIVE_ANALYSIS_USER
 from app.prompts.prompt_generation import PROMPT_GENERATION_SYSTEM, PROMPT_GENERATION_USER
+from app.scene_status import SCENE_STATUS_PENDING
 from app.services.composition_state import mark_completed_compositions_stale
+from app.services.llm_json import extract_json_object
 from app.services.progress import publish_progress
 
 logger = logging.getLogger(__name__)
@@ -100,7 +101,7 @@ class ScriptParserService:
         for attempt in range(MAX_RETRIES):
             try:
                 response = await self._llm.complete(messages, response_format=NarrativeAnalysis, temperature=0.3)
-                data = _extract_json(response.content)
+                data = extract_json_object(response.content)
                 return NarrativeAnalysis.model_validate(data)
             except Exception as e:
                 logger.warning("叙事分析第 %d 次尝试失败: %s", attempt + 1, e)
@@ -145,7 +146,7 @@ class ScriptParserService:
         for attempt in range(MAX_RETRIES):
             try:
                 response = await self._llm.complete(messages, response_format=ScenePromptsResult, temperature=0.5)
-                data = _extract_json(response.content)
+                data = extract_json_object(response.content)
                 result = ScenePromptsResult.model_validate(data)
                 return result.scenes
             except Exception as e:
@@ -239,7 +240,7 @@ class ScriptParserService:
                 dialogue=narrative.dialogue if narrative else None,
                 duration_seconds=duration_seconds,
                 transition_hint=transition_hint,
-                status="pending",
+                status=SCENE_STATUS_PENDING,
             )
             db.add(scene)
             await db.flush()
@@ -276,7 +277,7 @@ class ScriptParserService:
 
         # 更新项目状态
         project = (await db.execute(select(Project).where(Project.id == project_id))).scalar_one()
-        project.status = "parsed"
+        project.status = PROJECT_STATUS_PARSED
         await db.flush()
         publish_progress(project_id, "parse_progress", {"message": "正在收尾并更新项目状态...", "percent": 98})
 
@@ -284,42 +285,3 @@ class ScriptParserService:
             character_count=len(char_map),
             scene_count=len(scene_prompts),
         )
-
-
-def _extract_json(text: str) -> dict:
-    """从 LLM 输出中提取 JSON（处理可能的 markdown 代码块包裹）"""
-    value = (text or "").strip()
-    if not value:
-        raise ValueError("LLM 返回为空，无法提取 JSON")
-
-    # 优先尝试直接解析，兼容已经是纯 JSON 的场景。
-    try:
-        parsed = json.loads(value)
-        if isinstance(parsed, dict):
-            return parsed
-    except json.JSONDecodeError:
-        pass
-
-    # 兼容 markdown 代码块（即使前后附带说明文字）。
-    fenced_blocks = re.findall(r"```(?:json)?\s*([\s\S]*?)```", value, flags=re.IGNORECASE)
-    for block in fenced_blocks:
-        candidate = block.strip()
-        if not candidate:
-            continue
-        try:
-            parsed = json.loads(candidate)
-            if isinstance(parsed, dict):
-                return parsed
-        except json.JSONDecodeError:
-            continue
-
-    # 兜底：提取首尾花括号中的对象片段，兼容“说明文字 + JSON + 说明文字”。
-    start = value.find("{")
-    end = value.rfind("}")
-    if start != -1 and end > start:
-        candidate = value[start:end + 1]
-        parsed = json.loads(candidate)
-        if isinstance(parsed, dict):
-            return parsed
-
-    raise ValueError("LLM 输出中未找到可解析的 JSON 对象")

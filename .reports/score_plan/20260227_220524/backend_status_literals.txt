@@ -1,0 +1,37 @@
+$ cd '/mnt/e/Code/AbiWorkflow' && rg -n "\"pending\"|\"generating\"|\"generated\"|\"completed\"|\"failed\"|\"draft\"|\"parsing\"|\"parsed\"|\"composing\"" backend/app/api backend/app/services backend/app/tasks -g'*.py' -S
+backend/app/services/video_editor.py:197:                    VideoClip.status == "completed",
+backend/app/services/video_editor.py:390:            status="completed",
+backend/app/services/video_editor.py:456:            status="completed",
+backend/app/services/script_parser.py:243:                status="pending",
+backend/app/services/composition_state.py:20:            CompositionTask.status == "completed",
+backend/app/tasks/generate_tasks.py:115:                    "completed": completed,
+backend/app/tasks/generate_tasks.py:116:                    "failed": failed,
+backend/app/services/video_generator.py:89:            if normalized in {"completed", "failed", "error", "canceled", "cancelled"}:
+backend/app/services/video_generator.py:109:        scene_with_relations.status = "generating"
+backend/app/services/video_generator.py:121:                if status.status.lower() == "completed":
+backend/app/services/video_generator.py:132:                        status="completed",
+backend/app/services/video_generator.py:140:                        status="failed",
+backend/app/services/video_generator.py:149:                    status="failed",
+backend/app/services/video_generator.py:157:        all_completed = all(c.status == "completed" for c in clips)
+backend/app/services/video_generator.py:158:        scene_with_relations.status = "generated" if all_completed else "failed"
+backend/app/services/video_generator.py:210:                    if status.status.lower() == "completed":
+backend/app/services/video_generator.py:223:                            status="completed",
+backend/app/services/video_generator.py:233:                            status="failed",
+backend/app/services/video_generator.py:247:                        status="failed",
+backend/app/services/video_generator.py:262:            .where(Scene.project_id == project_id, Scene.status.in_(["pending", "failed", "generating"]))
+backend/app/api/scenes.py:111:        scene.status = "pending"
+backend/app/api/scenes.py:218:    completed_count = sum(1 for c in video_clips if c.status == "completed")
+backend/app/api/scenes.py:219:    failed_count = sum(1 for c in video_clips if c.status == "failed")
+backend/app/api/scenes.py:300:            media_url=_clip_to_media_url(c.file_path) if c.status == "completed" else None,
+backend/app/api/scenes.py:315:    if clip.status != "completed":
+backend/app/api/assets.py:76:            if clip.status == "failed":
+backend/app/api/assets.py:78:            if clip.status == "completed":
+backend/app/api/assets.py:124:    available_composition_count = sum(1 for item in compositions if item.status == "completed")
+backend/app/api/characters.py:87:                scene.status = "pending"
+backend/app/api/generation.py:85:            "completed": len(scenes),
+backend/app/api/generation.py:86:            "failed": 0,
+backend/app/api/generation.py:137:            "completed": sum(1 for s in scenes if s.status in READY_SCENE_STATUSES),
+backend/app/api/generation.py:138:            "failed": sum(1 for s in scenes if s.status == SCENE_STATUS_FAILED),
+backend/app/api/generation.py:246:            "generated": generated_count,
+backend/app/api/generation.py:247:            "failed": failed_count,
+backend/app/api/projects.py:354:            status="pending",

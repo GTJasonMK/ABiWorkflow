@@ -3,6 +3,7 @@ from __future__ import annotations
 from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.composition_status import COMPOSITION_STATUS_COMPLETED, COMPOSITION_STATUS_STALE
 from app.models import CompositionTask
 
 
@@ -17,9 +18,9 @@ async def mark_completed_compositions_stale(
         update(CompositionTask)
         .where(
             CompositionTask.project_id == project_id,
-            CompositionTask.status == "completed",
+            CompositionTask.status == COMPOSITION_STATUS_COMPLETED,
         )
-        .values(status="stale")
+        .values(status=COMPOSITION_STATUS_STALE)
     )
     if exclude_composition_id:
         stmt = stmt.where(CompositionTask.id != exclude_composition_id)

@@ -8,6 +8,14 @@ from sqlalchemy.orm import selectinload
 from app.config import resolve_runtime_path, settings
 from app.database import get_db
 from app.models import Project, Scene, SceneCharacter, VideoClip
+from app.clip_status import CLIP_STATUS_COMPLETED, CLIP_STATUS_FAILED
+from app.project_status import (
+    PROJECT_BUSY_STATUSES,
+    PROJECT_RESET_TO_PARSED_ON_CONTENT_CHANGE,
+    PROJECT_STATUS_COMPLETED,
+    PROJECT_STATUS_PARSED,
+)
+from app.scene_status import SCENE_STATUS_PENDING
 from app.schemas.common import ApiResponse
 from app.schemas.scene import (
     CandidateClipResponse,
@@ -26,7 +34,7 @@ GENERATION_AFFECTING_FIELDS = {
     "negative_prompt",
     "duration_seconds",
 }
-IMMUTABLE_PROJECT_STATUSES = {"parsing", "generating", "composing"}
+IMMUTABLE_PROJECT_STATUSES = PROJECT_BUSY_STATUSES
 ALLOWED_TRANSITION_HINTS = {"none", "cut", "crossfade", "fade_black"}
 NULLABLE_TEXT_FIELDS = {
     "description",
@@ -102,12 +110,12 @@ async def update_scene(scene_id: str, body: SceneUpdate, db: AsyncSession = Depe
     # 当修改会影响视频生成结果的字段时，清理旧片段并回退到待生成状态，避免“编辑后仍沿用旧视频”。
     if changed_fields & GENERATION_AFFECTING_FIELDS:
         await db.execute(delete(VideoClip).where(VideoClip.scene_id == scene.id))
-        scene.status = "pending"
-        if project.status in {"completed", "failed"}:
-            project.status = "parsed"
-    elif changed_fields and project.status == "completed":
+        scene.status = SCENE_STATUS_PENDING
+        if project.status in PROJECT_RESET_TO_PARSED_ON_CONTENT_CHANGE:
+            project.status = PROJECT_STATUS_PARSED
+    elif changed_fields and project.status == PROJECT_STATUS_COMPLETED:
         # 即使只改字幕/转场等，也会影响最终成片，回退项目状态便于用户重新合成。
-        project.status = "parsed"
+        project.status = PROJECT_STATUS_PARSED
 
     if changed_fields:
         await mark_completed_compositions_stale(db, project.id)
@@ -135,9 +143,9 @@ async def delete_scene(scene_id: str, db: AsyncSession = Depends(get_db)):
     for idx, item in enumerate(remaining_scenes):
         item.sequence_order = idx
 
-    if project.status in {"completed", "failed"}:
+    if project.status in PROJECT_RESET_TO_PARSED_ON_CONTENT_CHANGE:
         # 删除场景会影响成片与进度判断，回退到 parsed 让用户重新执行后续流程。
-        project.status = "parsed"
+        project.status = PROJECT_STATUS_PARSED
     await mark_completed_compositions_stale(db, project.id)
     await db.commit()
     return ApiResponse(data=None)
@@ -167,9 +175,9 @@ async def reorder_scenes(project_id: str, body: SceneReorderRequest, db: AsyncSe
         scene_map[scene_id].sequence_order = idx
 
     if order_changed:
-        if project.status == "completed":
+        if project.status == PROJECT_STATUS_COMPLETED:
             # 调整顺序会影响最终成片结果。
-            project.status = "parsed"
+            project.status = PROJECT_STATUS_PARSED
         await mark_completed_compositions_stale(db, project.id)
 
     await db.commit()
@@ -209,8 +217,8 @@ def _to_response(scene: Scene) -> SceneResponse:
         (getattr(scene, "video_clips", None) or []),
         key=lambda c: c.clip_order,
     )
-    completed_count = sum(1 for c in video_clips if c.status == "completed")
-    failed_count = sum(1 for c in video_clips if c.status == "failed")
+    completed_count = sum(1 for c in video_clips if c.status == CLIP_STATUS_COMPLETED)
+    failed_count = sum(1 for c in video_clips if c.status == CLIP_STATUS_FAILED)
     clip_summary = ClipSummary(
         total=len(video_clips),
         completed=completed_count,
@@ -291,7 +299,7 @@ async def list_candidates(scene_id: str, db: AsyncSession = Depends(get_db)):
             status=c.status,
             duration_seconds=c.duration_seconds,
             error_message=c.error_message,
-            media_url=_clip_to_media_url(c.file_path) if c.status == "completed" else None,
+            media_url=_clip_to_media_url(c.file_path) if c.status == CLIP_STATUS_COMPLETED else None,
         )
         for c in clips
     ]
@@ -306,7 +314,7 @@ async def select_candidate(scene_id: str, clip_id: str, db: AsyncSession = Depen
     )).scalar_one_or_none()
     if clip is None:
         raise HTTPException(status_code=404, detail="片段不存在")
-    if clip.status != "completed":
+    if clip.status != CLIP_STATUS_COMPLETED:
         raise HTTPException(status_code=400, detail="只能选择已完成的片段")
 
     # 将同组候选全部取消选中

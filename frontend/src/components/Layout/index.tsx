@@ -1,13 +1,14 @@
 import { Layout, Menu } from 'antd'
 import {
   DashboardOutlined,
+  DeploymentUnitOutlined,
   ProfileOutlined,
   ProjectOutlined,
   ReadOutlined,
   SettingOutlined,
-  VideoCameraOutlined,
 } from '@ant-design/icons'
 import { Outlet, useNavigate, useLocation } from 'react-router-dom'
+import TaskCenter from '../TaskCenter'
 
 const { Content, Sider } = Layout
 
@@ -28,9 +29,9 @@ const menuItems = [
     label: '任务中心',
   },
   {
-    key: '/assets',
-    icon: <VideoCameraOutlined />,
-    label: '媒体资产库',
+    key: '/operations',
+    icon: <DeploymentUnitOutlined />,
+    label: '运营中心',
   },
   {
     key: '/settings',
@@ -44,14 +45,30 @@ const menuItems = [
   },
 ]
 
+function resolveSelectedKey(pathname: string): string {
+  if (pathname === '/dashboard' || pathname.startsWith('/dashboard/')) return '/dashboard'
+  if (pathname === '/projects' || pathname.startsWith('/projects/')) {
+    return '/projects'
+  }
+  if (pathname === '/tasks' || pathname.startsWith('/tasks/')) {
+    return '/tasks'
+  }
+  if (pathname === '/operations' || pathname.startsWith('/operations/')) {
+    return '/operations'
+  }
+  if (pathname === '/settings' || pathname.startsWith('/settings/')) {
+    return '/settings'
+  }
+  if (pathname === '/guide' || pathname.startsWith('/guide/')) return '/guide'
+  return '/dashboard'
+}
+
 export default function AppLayout() {
   const navigate = useNavigate()
   const location = useLocation()
   const editionDate = new Date().toLocaleDateString('zh-CN')
 
-  const selectedKey = menuItems.find((item) => (
-    location.pathname === item.key || location.pathname.startsWith(`${item.key}/`)
-  ))?.key ?? '/dashboard'
+  const selectedKey = resolveSelectedKey(location.pathname)
 
   return (
     <div className="np-shell">
@@ -61,6 +78,7 @@ export default function AppLayout() {
           <h1 className="np-brand-line">AbiWorkflow 创作控制台</h1>
         </div>
         <div className="np-meta-stack">
+          <TaskCenter />
           <span className="np-meta-pill">剧本到视频</span>
           <span className="np-meta-pill">{editionDate}</span>
           <span className="np-meta-pill">中文版本</span>

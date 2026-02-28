@@ -12,16 +12,25 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.project_status import claim_project_status_or_409, try_restore_project_status
 from app.api.task_mode import resolve_async_mode
+from app.composition_status import COMPOSITION_STATUS_COMPLETED
 from app.config import resolve_runtime_path
 from app.database import get_db
 from app.models import CompositionTask, Project, Scene
+from app.project_status import (
+    PROJECT_COMPOSE_ALLOWED_FROM,
+    PROJECT_STATUS_COMPLETED,
+    PROJECT_STATUS_COMPOSING,
+    PROJECT_STATUS_FAILED,
+    PROJECT_STATUS_PARSED,
+)
+from app.scene_status import READY_SCENE_STATUSES
 from app.schemas.common import ApiResponse
 from app.services.composition_state import mark_completed_compositions_stale
+from app.services.task_records import create_task_record
 from app.services.video_editor import CompositionOptions, VideoEditorService
 
 router = APIRouter(tags=["视频合成"])
 logger = logging.getLogger(__name__)
-READY_SCENE_STATUSES = {"generated", "completed"}
 
 
 def _build_media_url(output_path: str | None, project_id: str) -> str | None:
@@ -54,7 +63,7 @@ async def get_latest_composition(project_id: str, db: AsyncSession = Depends(get
         select(CompositionTask)
         .where(
             CompositionTask.project_id == project_id,
-            CompositionTask.status == "completed",
+            CompositionTask.status == COMPOSITION_STATUS_COMPLETED,
         )
         .order_by(CompositionTask.created_at.desc())
         .limit(1)
@@ -99,8 +108,8 @@ async def start_composition(
         title_preview = "、".join(not_ready_scenes[:5])
         raise HTTPException(status_code=400, detail=f"以下场景尚未生成完成: {title_preview}")
 
-    if force_recover and project.status == "composing":
-        project.status = "parsed"
+    if force_recover and project.status == PROJECT_STATUS_COMPOSING:
+        project.status = PROJECT_STATUS_PARSED
         await db.commit()
         await db.refresh(project)
 
@@ -110,10 +119,10 @@ async def start_composition(
     await claim_project_status_or_409(
         db,
         project_id=project_id,
-        target_status="composing",
-        allowed_from_statuses=["parsed", "failed", "completed"],
+        target_status=PROJECT_STATUS_COMPOSING,
+        allowed_from_statuses=PROJECT_COMPOSE_ALLOWED_FROM,
         action_label="启动合成",
-        recover_hint_status="composing",
+        recover_hint_status=PROJECT_STATUS_COMPOSING,
     )
     await db.commit()
 
@@ -125,6 +134,18 @@ async def start_composition(
             from app.tasks.compose_tasks import compose_video_task
 
             task = compose_video_task.delay(project_id, composition_options.model_dump(), previous_status)
+            await create_task_record(
+                db,
+                task_type="compose",
+                target_type="project",
+                target_id=project_id,
+                project_id=project_id,
+                source_task_id=task.id,
+                status="pending",
+                message="合成任务已排队",
+                payload={"project_id": project_id, "options": composition_options.model_dump()},
+            )
+            await db.commit()
             return ApiResponse(data={"task_id": task.id, "mode": "async", "status": "queued"})
         except Exception as e:
             await try_restore_project_status(db, project_id, previous_status)
@@ -135,7 +156,7 @@ async def start_composition(
         task_id = await editor.compose(project_id, composition_options, db)
         await mark_completed_compositions_stale(db, project_id, exclude_composition_id=task_id)
         project = (await db.execute(select(Project).where(Project.id == project_id))).scalar_one()
-        project.status = "completed"
+        project.status = PROJECT_STATUS_COMPLETED
         await db.commit()
         return ApiResponse(data={"composition_id": task_id})
     except ValueError as e:
@@ -155,7 +176,7 @@ async def start_composition(
         except Exception:
             pass
         project = (await db.execute(select(Project).where(Project.id == project_id))).scalar_one()
-        project.status = "failed" if previous_status != "completed" else "completed"
+        project.status = PROJECT_STATUS_FAILED if previous_status != PROJECT_STATUS_COMPLETED else PROJECT_STATUS_COMPLETED
         await db.commit()
         raise HTTPException(status_code=500, detail=f"合成失败: {e}\n\n--- traceback ---\n{tb}")
 
@@ -221,7 +242,7 @@ async def trim_composition(
     )).scalar_one_or_none()
     if task is None:
         raise HTTPException(status_code=404, detail="合成任务不存在")
-    if task.status != "completed":
+    if task.status != COMPOSITION_STATUS_COMPLETED:
         raise HTTPException(status_code=400, detail="只能裁剪已完成的合成视频")
     if task.duration_seconds and request.end_time > task.duration_seconds:
         raise HTTPException(

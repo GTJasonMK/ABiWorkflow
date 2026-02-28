@@ -11,12 +11,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import inspect, text
 
-from app.api.system import _auto_import_ggk_if_needed
 from app.api.router import api_router
 from app.api.websocket import router as ws_router
 from app.config import resolve_runtime_path, settings
 from app.database import Base, engine
 from app.models import *  # noqa: F401,F403 — 确保所有模型注册到 Base.metadata
+from app.services.runtime_settings import auto_import_ggk_if_needed
 
 # ── 日志配置 ──────────────────────────────────────────────
 _LOG_FORMAT = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
@@ -192,7 +192,7 @@ async def lifespan(app: FastAPI):
         await conn.run_sync(Base.metadata.create_all)
         await conn.run_sync(_apply_column_migrations)
     await _migrate_assets_to_project_dirs()
-    await _auto_import_ggk_if_needed()
+    await auto_import_ggk_if_needed()
     yield
 
 

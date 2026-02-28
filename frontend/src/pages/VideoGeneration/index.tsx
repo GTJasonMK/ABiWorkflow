@@ -24,8 +24,12 @@ import WorkflowSteps from '../../components/WorkflowSteps'
 import CandidatePickerModal from '../../components/CandidatePickerModal'
 import { getApiErrorMessage } from '../../utils/error'
 import { shouldSuggestForceRecover } from '../../utils/forceRecover'
+import { generatePanelVoiceLines, listProjectPanels, submitPanelLipsync, submitPanelVideo } from '../../api/panels'
+import type { Panel } from '../../types/panel'
+import ProviderKeyPromptModal from '../../components/ProviderKeyPromptModal'
 
 const { Text, Paragraph } = Typography
+type PanelSubmitMode = 'video' | 'tts' | 'lipsync'
 
 export default function VideoGeneration() {
   const { id: projectId } = useParams<{ id: string }>()
@@ -33,6 +37,10 @@ export default function VideoGeneration() {
   const { scenes, loading, fetchScenes } = useSceneStore()
   const { messages, connected, clearMessages } = useWebSocket(projectId)
   const [generating, setGenerating] = useState(false)
+  const [panels, setPanels] = useState<Panel[]>([])
+  const [panelsLoading, setPanelsLoading] = useState(false)
+  const [submittingAction, setSubmittingAction] = useState<{ panelId: string; mode: PanelSubmitMode } | null>(null)
+  const [providerPrompt, setProviderPrompt] = useState<{ panel: Panel; mode: PanelSubmitMode } | null>(null)
   const [pickerScene, setPickerScene] = useState<{ id: string; title: string } | null>(null)
   const [generatingCandidateId, setGeneratingCandidateId] = useState<string | null>(null)
   const { message, modal } = AntdApp.useApp()
@@ -54,6 +62,16 @@ export default function VideoGeneration() {
           setGenerating(true)
         }
       }).catch(() => {})
+
+      setPanelsLoading(true)
+      listProjectPanels(projectId)
+        .then((rows) => setPanels(rows))
+        .catch((error) => {
+          message.error(getApiErrorMessage(error, '加载分镜失败'))
+        })
+        .finally(() => {
+          setPanelsLoading(false)
+        })
     }
   }, [projectId, fetchScenes, message])
 
@@ -175,6 +193,60 @@ export default function VideoGeneration() {
       message.error(getApiErrorMessage(error, '候选生成失败'))
     } finally {
       setGeneratingCandidateId(null)
+    }
+  }
+
+  const refreshPanels = async () => {
+    if (!projectId) return
+    setPanelsLoading(true)
+    try {
+      const rows = await listProjectPanels(projectId)
+      setPanels(rows)
+    } catch (error) {
+      message.error(getApiErrorMessage(error, '加载分镜失败'))
+    } finally {
+      setPanelsLoading(false)
+    }
+  }
+
+  const handleSubmitPanelGeneration = (panel: Panel) => {
+    setProviderPrompt({ panel, mode: 'video' })
+  }
+
+  const handleSubmitPanelTts = (panel: Panel) => {
+    setProviderPrompt({ panel, mode: 'tts' })
+  }
+
+  const handleSubmitPanelLipsync = (panel: Panel) => {
+    setProviderPrompt({ panel, mode: 'lipsync' })
+  }
+
+  const handleConfirmPanelProvider = async (providerKey: string) => {
+    if (!providerPrompt) {
+      return
+    }
+    const { panel, mode } = providerPrompt
+
+    setSubmittingAction({ panelId: panel.id, mode })
+    try {
+      const result = mode === 'video'
+        ? await submitPanelVideo(panel.id, { provider_key: providerKey, payload: {} })
+        : mode === 'tts'
+          ? await generatePanelVoiceLines(panel.id, { provider_key: providerKey, payload: {} })
+          : await submitPanelLipsync(panel.id, { provider_key: providerKey, payload: {} })
+      const task = (result.task ?? {}) as { id?: string; source_task_id?: string }
+      const taskName = task.id || task.source_task_id || '未知'
+      const modeLabel = mode === 'video' ? '分镜视频' : mode === 'tts' ? '语音' : '口型同步'
+      message.success(`${modeLabel}任务已提交：${taskName}`)
+      await refreshPanels()
+      setProviderPrompt(null)
+    } catch (error) {
+      const fallback = mode === 'video' ? '提交分镜生成失败' : mode === 'tts' ? '提交语音生成失败' : '提交口型同步失败'
+      message.error(getApiErrorMessage(error, fallback))
+      throw error
+    }
+    finally {
+      setSubmittingAction(null)
     }
   }
 
@@ -343,6 +415,87 @@ export default function VideoGeneration() {
             </List.Item>
           )}
         />
+
+        <Card
+          title="分镜级生成（实验链路）"
+          className="np-panel-card"
+          extra={(
+            <Button icon={<ReloadOutlined />} onClick={() => void refreshPanels()} loading={panelsLoading}>
+              刷新分镜
+            </Button>
+          )}
+        >
+          {panelsLoading ? (
+            <Spin />
+          ) : panels.length === 0 ? (
+            <Text type="secondary">暂无分镜数据，可在“场景编辑 - 分集分镜模式”创建。</Text>
+          ) : (
+            <List
+              size="small"
+              dataSource={panels}
+              renderItem={(panel) => (
+                <List.Item
+                  actions={[
+                    <Tooltip
+                      key="video-tip"
+                      title={(!panel.visual_prompt && !panel.script_text) ? '缺少 visual_prompt / script_text' : '提交分镜视频生成任务'}
+                    >
+                      <span>
+                        <Button
+                          size="small"
+                          type="primary"
+                          loading={submittingAction?.panelId === panel.id && submittingAction.mode === 'video'}
+                          disabled={!panel.visual_prompt && !panel.script_text}
+                          onClick={() => void handleSubmitPanelGeneration(panel)}
+                        >
+                          视频
+                        </Button>
+                      </span>
+                    </Tooltip>,
+                    <Tooltip
+                      key="tts-tip"
+                      title={(!panel.tts_text && !panel.script_text) ? '缺少 tts_text / script_text' : '提交语音生成任务'}
+                    >
+                      <span>
+                        <Button
+                          size="small"
+                          loading={submittingAction?.panelId === panel.id && submittingAction.mode === 'tts'}
+                          disabled={!panel.tts_text && !panel.script_text}
+                          onClick={() => void handleSubmitPanelTts(panel)}
+                        >
+                          语音
+                        </Button>
+                      </span>
+                    </Tooltip>,
+                    <Tooltip
+                      key="lipsync-tip"
+                      title={(!panel.video_url || !panel.tts_audio_url) ? '口型同步需要 video_url + tts_audio_url' : '提交口型同步任务'}
+                    >
+                      <span>
+                        <Button
+                          size="small"
+                          loading={submittingAction?.panelId === panel.id && submittingAction.mode === 'lipsync'}
+                          disabled={!panel.video_url || !panel.tts_audio_url}
+                          onClick={() => void handleSubmitPanelLipsync(panel)}
+                        >
+                          口型
+                        </Button>
+                      </span>
+                    </Tooltip>,
+                  ]}
+                >
+                  <Space size={8}>
+                    <Text>{panel.episode_id.slice(0, 6)} · #{panel.panel_order + 1} · {panel.title}</Text>
+                    <Tag className="np-status-tag">{panel.status}</Tag>
+                    <Text type="secondary">{panel.duration_seconds.toFixed(1)} 秒</Text>
+                    {panel.video_url && <Tag className="np-status-tag">有视频</Tag>}
+                    {panel.tts_audio_url && <Tag className="np-status-tag">有语音</Tag>}
+                  </Space>
+                </List.Item>
+              )}
+            />
+          )}
+        </Card>
       </div>
 
       {pickerScene && (
@@ -356,6 +509,38 @@ export default function VideoGeneration() {
           }}
         />
       )}
+
+      <ProviderKeyPromptModal
+        open={!!providerPrompt}
+        title={
+          providerPrompt?.mode === 'video'
+            ? '输入分镜视频 Provider Key'
+            : providerPrompt?.mode === 'tts'
+              ? '输入语音生成 Provider Key'
+              : '输入口型同步 Provider Key'
+        }
+        description={providerPrompt ? `分镜：${providerPrompt.panel.title}` : undefined}
+        defaultValue={
+          providerPrompt?.mode === 'video'
+            ? 'video.ggk'
+            : providerPrompt?.mode === 'tts'
+              ? 'tts.ggk'
+              : 'lipsync.ggk'
+        }
+        okText="提交"
+        cancelText="取消"
+        recentStorageKey={
+          providerPrompt?.mode === 'video'
+            ? 'abi_recent_panel_video_provider_keys'
+            : providerPrompt?.mode === 'tts'
+              ? 'abi_recent_panel_tts_provider_keys'
+              : 'abi_recent_panel_lipsync_provider_keys'
+        }
+        onCancel={() => {
+          setProviderPrompt(null)
+        }}
+        onConfirm={handleConfirmPanelProvider}
+      />
     </section>
   )
 }

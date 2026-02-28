@@ -1,0 +1,9 @@
+$ cd '/mnt/e/Code/AbiWorkflow' && rg -n "\"pending\"|\"generating\"|\"generated\"|\"completed\"|\"failed\"|\"draft\"|\"parsing\"|\"parsed\"|\"composing\"" backend/app/api backend/app/services backend/app/tasks -g'*.py' -S
+backend/app/tasks/generate_tasks.py:115:                    "completed": completed,
+backend/app/tasks/generate_tasks.py:116:                    "failed": failed,
+backend/app/api/generation.py:85:            "completed": len(scenes),
+backend/app/api/generation.py:86:            "failed": 0,
+backend/app/api/generation.py:137:            "completed": sum(1 for s in scenes if s.status in READY_SCENE_STATUSES),
+backend/app/api/generation.py:138:            "failed": sum(1 for s in scenes if s.status == SCENE_STATUS_FAILED),
+backend/app/api/generation.py:246:            "generated": generated_count,
+backend/app/api/generation.py:247:            "failed": failed_count,

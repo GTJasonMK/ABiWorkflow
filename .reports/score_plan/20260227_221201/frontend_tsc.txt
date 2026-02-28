@@ -1,0 +1,1 @@
+$ cd '/mnt/e/Code/AbiWorkflow/frontend' && npx tsc --noEmit --pretty false --project tsconfig.json

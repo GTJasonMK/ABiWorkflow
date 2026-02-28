@@ -1,0 +1,43 @@
+export interface BackendSettingsFormValues {
+  app_name: string
+  debug: boolean
+  llm_provider: 'openai' | 'anthropic' | 'deepseek' | 'ggk'
+  openai_model: string
+  openai_base_url: string
+  openai_api_key: string
+  anthropic_model: string
+  anthropic_api_key: string
+  deepseek_model: string
+  deepseek_base_url: string
+  deepseek_api_key: string
+  ggk_base_url: string
+  ggk_text_model: string
+  ggk_api_key: string
+  video_provider: string
+  video_output_dir: string
+  composition_output_dir: string
+  video_provider_max_duration_seconds: number
+  video_poll_interval_seconds: number
+  video_task_timeout_seconds: number
+  ggk_video_model: string
+  ggk_video_aspect_ratio: string
+  ggk_video_resolution: string
+  ggk_video_preset: string
+  ggk_video_model_duration_profiles: string
+  ggk_request_timeout_seconds: number
+  tts_voice: string
+  video_http_base_url: string
+  video_http_api_key: string
+  video_http_generate_path: string
+  video_http_status_path: string
+  video_http_task_id_path: string
+  video_http_status_value_path: string
+  video_http_progress_path: string
+  video_http_result_url_path: string
+  video_http_error_path: string
+  video_http_request_timeout_seconds: number
+  database_url: string
+  redis_url: string
+  celery_broker_url: string
+  celery_result_backend: string
+}

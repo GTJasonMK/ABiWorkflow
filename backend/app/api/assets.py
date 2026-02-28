@@ -7,6 +7,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.clip_status import CLIP_STATUS_COMPLETED, CLIP_STATUS_FAILED
+from app.composition_status import COMPOSITION_STATUS_COMPLETED
 from app.config import resolve_runtime_path, settings
 from app.database import get_db
 from app.models import CompositionTask, Project, Scene, VideoClip
@@ -73,9 +75,9 @@ async def get_project_assets(project_id: str, db: AsyncSession = Depends(get_db)
         clip_payload: list[dict] = []
         for clip in clips:
             total_clips += 1
-            if clip.status == "failed":
+            if clip.status == CLIP_STATUS_FAILED:
                 failed_clips += 1
-            if clip.status == "completed":
+            if clip.status == CLIP_STATUS_COMPLETED:
                 ready_clips += 1
 
             clip_payload.append({
@@ -121,7 +123,7 @@ async def get_project_assets(project_id: str, db: AsyncSession = Depends(get_db)
         "created_at": item.created_at.isoformat() if item.created_at else None,
         "updated_at": item.updated_at.isoformat() if item.updated_at else None,
     } for item in compositions]
-    available_composition_count = sum(1 for item in compositions if item.status == "completed")
+    available_composition_count = sum(1 for item in compositions if item.status == COMPOSITION_STATUS_COMPLETED)
 
     return ApiResponse(data={
         "project_id": project.id,

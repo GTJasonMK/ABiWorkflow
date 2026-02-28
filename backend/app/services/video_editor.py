@@ -3,8 +3,6 @@ from __future__ import annotations
 import logging
 import traceback
 import uuid
-from enum import Enum
-from pathlib import Path
 from typing import Any
 
 from moviepy import (
@@ -12,36 +10,30 @@ from moviepy import (
     ColorClip,
     CompositeAudioClip,
     CompositeVideoClip,
-    TextClip,
     VideoFileClip,
     concatenate_videoclips,
 )
-from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.composition_status import COMPOSITION_STATUS_COMPLETED
 from app.config import resolve_runtime_path, settings
-from app.models import CompositionTask, Scene, VideoClip
+from app.models import CompositionTask, Scene
+from app.scene_status import READY_SCENE_STATUSES
+from app.services.video_editor_media import (
+    add_subtitles,
+    build_subtitles_timeline,
+    collect_scene_assets,
+    load_scene_clip,
+    resolve_media_path,
+    resolve_transition,
+    trim_video_file,
+)
+from app.services.video_editor_types import CompositionOptions, TransitionType
 from app.services.progress import publish_progress
 from app.services.tts_service import TTSService
 
 logger = logging.getLogger(__name__)
-READY_SCENE_STATUSES = {"generated", "completed"}
-
-
-class TransitionType(str, Enum):
-    NONE = "none"
-    CROSSFADE = "crossfade"
-    FADE_BLACK = "fade_black"
-
-
-class CompositionOptions(BaseModel):
-    """合成选项"""
-
-    transition_type: TransitionType = TransitionType.CROSSFADE
-    transition_duration: float = Field(default=0.5, ge=0.0, le=5.0)
-    include_subtitles: bool = True
-    include_tts: bool = True
 
 
 class VideoEditorService:
@@ -49,108 +41,6 @@ class VideoEditorService:
 
     def __init__(self):
         self._tts = TTSService()
-
-    @staticmethod
-    def _resolve_media_path(path_value: str | Path) -> Path:
-        """解析媒体文件路径，优先运行时稳定路径，兼容历史 cwd 相对路径。"""
-        raw = Path(path_value)
-        if raw.is_absolute():
-            return raw.resolve()
-
-        runtime_based = resolve_runtime_path(raw)
-        cwd_based = (Path.cwd() / raw).resolve()
-        if runtime_based.exists():
-            return runtime_based
-        if cwd_based.exists():
-            return cwd_based
-        return runtime_based
-
-    @staticmethod
-    def _resolve_transition(scene_hint: str | None, default_transition: TransitionType) -> TransitionType:
-        """解析场景级转场提示，默认回落到全局配置。"""
-        if default_transition == TransitionType.NONE:
-            return TransitionType.NONE
-
-        if not scene_hint:
-            return default_transition
-
-        normalized = scene_hint.strip().lower()
-        if normalized in {"cut", "none"}:
-            return TransitionType.NONE
-        if normalized == "fade_black":
-            return TransitionType.FADE_BLACK
-        if normalized == "crossfade":
-            return TransitionType.CROSSFADE
-
-        logger.warning("未知的 transition_hint=%s，回落到全局配置 %s", scene_hint, default_transition.value)
-        return default_transition
-
-    @staticmethod
-    def _safe_crossfade_overlap(left_duration: float, right_duration: float, requested: float) -> float:
-        """计算安全可用的交叉淡入淡出时长，避免超过任一片段时长。"""
-        requested_duration = max(0.0, float(requested))
-        left = max(0.0, float(left_duration))
-        right = max(0.0, float(right_duration))
-        max_overlap = min(left, right)
-        return min(requested_duration, max_overlap)
-
-    @staticmethod
-    def _load_video_clip(path: Path) -> VideoFileClip:
-        """加载并验证单个视频片段，确保可用于后续合成。"""
-        clip = VideoFileClip(str(path))
-        if clip.duration is None or clip.duration <= 0:
-            clip.close()
-            raise ValueError(f"视频文件无效（时长为空或为零）: {path}")
-        if clip.size is None or clip.w <= 0 or clip.h <= 0:
-            clip.close()
-            raise ValueError(f"视频文件无效（尺寸异常）: {path}")
-        return clip
-
-    def _load_scene_clip(self, clip_paths: list[Path]) -> VideoFileClip | CompositeVideoClip:
-        """加载场景内部的多个片段并拼接（不含转场）。"""
-        clips = [self._load_video_clip(p) for p in clip_paths]
-
-        if not clips:
-            raise ValueError("没有可用的视频片段")
-
-        if len(clips) == 1:
-            return clips[0]
-
-        return concatenate_videoclips(clips, method="compose")
-
-    def _add_subtitles(
-        self,
-        video: VideoFileClip | CompositeVideoClip,
-        subtitles: list[dict],
-    ) -> VideoFileClip | CompositeVideoClip:
-        """叠加字幕，无有效字幕时直接返回原视频（避免不必要的 CompositeVideoClip 嵌套）。"""
-        subtitle_clips = []
-
-        for sub in subtitles:
-            text = sub.get("text", "")
-            duration = max(0.1, float(sub.get("duration", 5.0)))
-            start = max(0.0, float(sub.get("start", 0.0)))
-
-            if text.strip():
-                try:
-                    txt_clip = TextClip(
-                        text=text,
-                        font_size=28,
-                        color="white",
-                        stroke_color="black",
-                        stroke_width=1,
-                        size=(video.w - 80, None),
-                        method="caption",
-                        duration=duration,
-                    )
-                    txt_clip = txt_clip.with_start(start).with_position(("center", video.h - 80))
-                    subtitle_clips.append(txt_clip)
-                except Exception as e:
-                    logger.warning("字幕渲染失败: %s", e)
-
-        if subtitle_clips:
-            return CompositeVideoClip([video] + subtitle_clips)
-        return video
 
     async def compose(
         self,
@@ -184,68 +74,17 @@ class VideoEditorService:
 
         publish_progress(project_id, "compose_progress", {"message": "收集视频片段...", "percent": 10})
 
-        # 收集场景素材
-        scene_assets: list[dict[str, Any]] = []
-        subtitles: list[dict[str, Any]] = []
-        missing_scenes: list[str] = []
-
-        for scene in scenes:
-            clips = (await db.execute(
-                select(VideoClip)
-                .where(
-                    VideoClip.scene_id == scene.id,
-                    VideoClip.status == "completed",
-                    VideoClip.is_selected == True,  # noqa: E712
-                )
-                .order_by(VideoClip.clip_order)
-            )).scalars().all()
-
-            scene_clip_paths: list[Path] = []
-            scene_duration = 0.0
-            for clip in clips:
-                if clip.file_path:
-                    clip_path = self._resolve_media_path(clip.file_path)
-                    if clip_path.exists():
-                        scene_clip_paths.append(clip_path)
-                        scene_duration += float(clip.duration_seconds or 0.0)
-
-            if not scene_clip_paths:
-                missing_scenes.append(scene.title)
-                continue
-
-            scene_duration = max(scene_duration, 0.1)
-            scene_assets.append({
-                "scene_id": scene.id,
-                "scene_title": scene.title,
-                "clip_paths": scene_clip_paths,
-                "duration": scene_duration,
-                "dialogue": scene.dialogue,
-                "transition_hint": scene.transition_hint,
-            })
+        scene_assets, missing_scenes = await collect_scene_assets(scenes, db)
 
         if missing_scenes:
             missing_preview = "、".join(missing_scenes[:5])
             raise ValueError(f"以下场景缺少可用视频片段: {missing_preview}")
 
-        # 按场景时间轴计算字幕/TTS 起始时间，与 concatenate_videoclips(chain) 时间线对齐
-        current_start = 0.0
-        for idx, asset in enumerate(scene_assets):
-            if asset["dialogue"]:
-                subtitles.append({
-                    "scene_id": asset["scene_id"],
-                    "text": asset["dialogue"],
-                    "duration": asset["duration"],
-                    "start": current_start,
-                })
-
-            current_start += asset["duration"]
-            # fade_black 转场会插入黑场片段，字幕起始需跳过该时长
-            if idx < len(scene_assets) - 1 and options.transition_duration > 0:
-                transition = self._resolve_transition(asset["transition_hint"], options.transition_type)
-                if transition == TransitionType.FADE_BLACK:
-                    current_start += options.transition_duration
-
-        total_duration = max(0.1, current_start)
+        subtitles, total_duration = build_subtitles_timeline(
+            scene_assets,
+            options.transition_type,
+            options.transition_duration,
+        )
 
         # 先并行生成 TTS 配音（在视频编码之前完成，避免二次编码）
         tts_audio_map: dict[str, Any] = {}
@@ -263,7 +102,7 @@ class VideoEditorService:
             scene_videos: list[VideoFileClip | CompositeVideoClip] = []
             for asset in scene_assets:
                 try:
-                    scene_video = self._load_scene_clip(asset["clip_paths"])
+                    scene_video = load_scene_clip(asset["clip_paths"])
                 except Exception as e:
                     raise ValueError(f"加载场景 [{asset['scene_title']}] 的视频失败: {e}") from e
                 logger.info(
@@ -285,7 +124,7 @@ class VideoEditorService:
                 # fade_black 转场：在相邻场景之间插入黑场片段
                 if idx < len(scene_videos) - 1:
                     asset = scene_assets[idx]
-                    transition = self._resolve_transition(asset["transition_hint"], options.transition_type)
+                    transition = resolve_transition(asset["transition_hint"], options.transition_type)
 
                     if transition == TransitionType.FADE_BLACK and options.transition_duration > 0:
                         black = ColorClip(
@@ -313,7 +152,7 @@ class VideoEditorService:
             try:
                 # 叠加字幕
                 if options.include_subtitles and subtitles:
-                    render_video = self._add_subtitles(merged_video, subtitles)
+                    render_video = add_subtitles(merged_video, subtitles)
 
                 # 叠加 TTS 音频（与视频一起单次写入，避免二次编码）
                 if tts_audio_map:
@@ -387,7 +226,7 @@ class VideoEditorService:
             transition_type=options.transition_type.value,
             include_subtitles=options.include_subtitles,
             include_tts=options.include_tts,
-            status="completed",
+            status=COMPOSITION_STATUS_COMPLETED,
         )
         db.add(task)
         await db.commit()
@@ -416,7 +255,7 @@ class VideoEditorService:
         if not original.output_path:
             raise ValueError("原始视频文件路径为空")
 
-        source_path = self._resolve_media_path(original.output_path)
+        source_path = resolve_media_path(original.output_path)
         if not source_path.exists():
             raise ValueError(f"源视频文件不存在: {source_path}")
 
@@ -425,25 +264,7 @@ class VideoEditorService:
         output_dir.mkdir(parents=True, exist_ok=True)
         output_path = output_dir / f"{new_id}.mp4"
 
-        def _do_trim() -> float:
-            clip = VideoFileClip(str(source_path))
-            try:
-                actual_end = min(end_time, clip.duration)
-                trimmed = clip.subclipped(start_time, actual_end)
-                has_audio = trimmed.audio is not None
-                trimmed.write_videofile(
-                    str(output_path),
-                    fps=24,
-                    codec="libx264",
-                    audio=has_audio,
-                    audio_codec="aac" if has_audio else None,
-                    logger=None,
-                )
-                return trimmed.duration
-            finally:
-                clip.close()
-
-        actual_duration = await _asyncio.to_thread(_do_trim)
+        actual_duration = await _asyncio.to_thread(trim_video_file, source_path, output_path, start_time, end_time)
 
         new_task = CompositionTask(
             id=new_id,
@@ -453,7 +274,7 @@ class VideoEditorService:
             transition_type=original.transition_type,
             include_subtitles=original.include_subtitles,
             include_tts=original.include_tts,
-            status="completed",
+            status=COMPOSITION_STATUS_COMPLETED,
         )
         db.add(new_task)
 

@@ -1,83 +1,37 @@
-import { Badge, Button, Drawer, Empty, Space, Tag, Typography, App as AntdApp } from 'antd'
-import { BellOutlined, DeleteOutlined, ReloadOutlined } from '@ant-design/icons'
 import { useMemo } from 'react'
-import { useTaskStore, type TaskItem } from '../../stores/taskStore'
-
-const { Text } = Typography
-
-function renderTaskType(taskType: TaskItem['taskType']): string {
-  if (taskType === 'parse') return '剧本解析'
-  if (taskType === 'generate') return '视频生成'
-  return '视频合成'
-}
-
-function renderStateLabel(state: string): string {
-  switch (state) {
-    case 'pending':
-    case 'queued':
-      return '排队中'
-    case 'started':
-    case 'processing':
-      return '执行中'
-    case 'success':
-    case 'completed':
-      return '已完成'
-    case 'failure':
-    case 'failed':
-      return '失败'
-    case 'timeout':
-      return '超时'
-    default:
-      return state
-  }
-}
-
-function renderStateClass(task: TaskItem): string {
-  if (!task.ready) return 'np-status-tag np-status-generating'
-  if (task.successful) return 'np-status-tag np-status-generated'
-  return 'np-status-tag np-status-failed'
-}
-
-function renderResultSummary(task: TaskItem): string | null {
-  if (!task.result || !task.successful) return null
-
-  if (task.taskType === 'parse') {
-    const scenes = Number(task.result.scene_count ?? 0)
-    const characters = Number(task.result.character_count ?? 0)
-    return `结果：${characters} 角色 / ${scenes} 场景`
-  }
-  if (task.taskType === 'generate') {
-    const completed = Number(task.result.completed ?? 0)
-    const failed = Number(task.result.failed ?? 0)
-    return `结果：${completed} 成功 / ${failed} 失败`
-  }
-  if (task.taskType === 'compose') {
-    const compositionId = String(task.result.composition_id ?? '')
-    return compositionId ? `结果：合成编号 ${compositionId.slice(0, 12)}` : null
-  }
-  return null
-}
+import { useNavigate } from 'react-router-dom'
+import { App as AntdApp, Badge, Button, Drawer, Empty, Space } from 'antd'
+import { ArrowRightOutlined, BellOutlined, ReloadOutlined } from '@ant-design/icons'
+import { useTaskStore } from '../../stores/taskStore'
+import { getApiErrorMessage } from '../../utils/error'
+import TaskRecordList from '../TaskRecordList'
+import { sortTaskRecordsByUpdatedAt, summarizeTaskRecords } from '../../utils/taskRecords'
+import useTaskRecords from '../../hooks/useTaskRecords'
 
 export default function TaskCenter() {
+  const navigate = useNavigate()
   const { message } = AntdApp.useApp()
-  const {
-    tasks,
-    panelOpen,
-    setPanelOpen,
-    removeTask,
-    clearFinished,
-    clearAll,
-    refreshTask,
-  } = useTaskStore()
+  const { panelOpen, setPanelOpen } = useTaskStore()
+  const { tasks, loading, refresh } = useTaskRecords({
+    enabled: panelOpen,
+    limit: 200,
+    includeDismissed: false,
+    pollIntervalMs: 4000,
+    onError: (error) => {
+      message.error(getApiErrorMessage(error, '加载任务失败'))
+    },
+  })
 
-  const runningCount = useMemo(
-    () => tasks.filter((task) => !task.ready).length,
-    [tasks],
+  const sortedTasks = useMemo(() => sortTaskRecordsByUpdatedAt(tasks), [tasks])
+  const counts = useMemo(() => summarizeTaskRecords(sortedTasks), [sortedTasks])
+  const runningTasks = useMemo(
+    () => sortedTasks.filter((task) => !task.ready).slice(0, 8),
+    [sortedTasks],
   )
 
   return (
     <>
-      <Badge count={runningCount} size="small">
+      <Badge count={counts.running} size="small">
         <Button
           icon={<BellOutlined />}
           onClick={() => setPanelOpen(true)}
@@ -93,67 +47,52 @@ export default function TaskCenter() {
         onClose={() => setPanelOpen(false)}
         extra={(
           <Space>
-            <Button size="small" danger onClick={clearAll}>
-              清空全部
-            </Button>
-            <Button size="small" onClick={clearFinished}>
-              清理已完成
+            <Button
+              size="small"
+              onClick={() => void refresh({ showLoading: true })}
+              loading={loading}
+              icon={<ReloadOutlined />}
+            >
+              刷新
             </Button>
           </Space>
         )}
       >
+        <div className="np-kpi-grid" style={{ marginBottom: 12 }}>
+          <article className="np-kpi-card">
+            <p className="np-kpi-label">执行中</p>
+            <p className="np-kpi-value">{counts.running}</p>
+          </article>
+          <article className="np-kpi-card">
+            <p className="np-kpi-label">已完成</p>
+            <p className="np-kpi-value">{counts.success}</p>
+          </article>
+          <article className="np-kpi-card">
+            <p className="np-kpi-label">失败/超时</p>
+            <p className="np-kpi-value">{counts.failed}</p>
+          </article>
+        </div>
+
         {tasks.length === 0 ? (
           <Empty description="暂无任务记录" />
+        ) : runningTasks.length === 0 ? (
+          <Empty description="当前没有执行中的任务" />
         ) : (
-          <div className="np-task-list">
-            {tasks.map((task) => {
-              const summary = renderResultSummary(task)
-              return (
-                <article key={task.taskId} className="np-task-item">
-                  <header className="np-task-item-head">
-                    <Space size={6}>
-                      <Tag className="np-status-tag">{renderTaskType(task.taskType)}</Tag>
-                      <Tag className={renderStateClass(task)}>{renderStateLabel(task.state)}</Tag>
-                    </Space>
-                    <Space size={6}>
-                      <Button
-                        size="small"
-                        icon={<ReloadOutlined />}
-                        onClick={async () => {
-                          try {
-                            await refreshTask(task.taskId)
-                          } catch (error) {
-                            message.error((error as Error).message || '刷新任务失败')
-                          }
-                        }}
-                      />
-                      <Button
-                        size="small"
-                        danger
-                        icon={<DeleteOutlined />}
-                        onClick={() => removeTask(task.taskId)}
-                      />
-                    </Space>
-                  </header>
-
-                  <div className="np-task-item-body">
-                    <Text type="secondary">项目：{task.projectId.slice(0, 8) || '-'}</Text>
-                    <Text type="secondary">任务编号：{task.taskId.slice(0, 12)}</Text>
-                    <Text type="secondary">
-                      更新时间：{new Date(task.updatedAt).toLocaleString('zh-CN')}
-                    </Text>
-                    {summary && (
-                      <Text type="secondary">{summary}</Text>
-                    )}
-                    {task.error && (
-                      <Text className="np-task-error">{task.error}</Text>
-                    )}
-                  </div>
-                </article>
-              )
-            })}
-          </div>
+          <TaskRecordList tasks={runningTasks} mode="compact" />
         )}
+
+        <Space style={{ marginTop: 14 }}>
+          <Button
+            type="primary"
+            icon={<ArrowRightOutlined />}
+            onClick={() => {
+              setPanelOpen(false)
+              navigate('/tasks')
+            }}
+          >
+            进入任务详情页
+          </Button>
+        </Space>
       </Drawer>
     </>
   )

@@ -10,6 +10,7 @@ from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
 import app.api.system as system_api
+import app.services.runtime_settings as runtime_settings_service
 from app.config import settings
 from app.models import CompositionTask, Project, Scene, VideoClip
 
@@ -22,18 +23,19 @@ async def test_system_runtime_endpoint_should_return_runtime_summary(client: Asy
     payload = response.json()
     assert payload["success"] is True
     assert isinstance(payload["data"], dict)
-    assert payload["data"]["app_name"] == "AbiWorkflow"
-    assert "llm_provider" in payload["data"]
-    assert "celery_worker_online" in payload["data"]
     assert payload["data"]["app"]["name"] == "AbiWorkflow"
+    assert isinstance(payload["data"]["app"]["debug"], bool)
     assert "database_url" in payload["data"]["app"]
     assert payload["data"]["llm"]["provider"] in {"openai", "anthropic", "deepseek", "ggk"}
+    assert isinstance(payload["data"]["llm"]["any_key_configured"], bool)
     assert "openai" in payload["data"]["llm"]
     assert "anthropic" in payload["data"]["llm"]
     assert "deepseek" in payload["data"]["llm"]
     assert "ggk" in payload["data"]["llm"]
     assert "queue" in payload["data"]
+    assert isinstance(payload["data"]["queue"]["celery_worker_online"], bool)
     assert "video" in payload["data"]
+    assert payload["data"]["video"]["provider"] == settings.video_provider
     assert "http_provider" in payload["data"]["video"]
     assert "ggk_provider" in payload["data"]["video"]
     assert "model_duration_profiles" in payload["data"]["video"]["ggk_provider"]
@@ -47,7 +49,7 @@ async def test_system_runtime_endpoint_should_update_settings(
 ):
     env_file = tmp_path / ".env"
     env_file.write_text("LLM_PROVIDER=openai\nVIDEO_PROVIDER=mock\n", encoding="utf-8")
-    monkeypatch.setattr(system_api, "_resolve_env_file_path", lambda: env_file)
+    monkeypatch.setattr(runtime_settings_service, "_resolve_env_file_path", lambda: env_file)
 
     response = await client.put("/api/system/runtime", json={
         "llm_provider": "deepseek",
@@ -59,10 +61,10 @@ async def test_system_runtime_endpoint_should_update_settings(
 
     assert response.status_code == 200
     data = response.json()["data"]
-    assert data["llm_provider"] == "deepseek"
-    assert data["llm_model"] == "deepseek-chat-v2"
-    assert data["video_provider"] == "http"
-    assert data["debug"] is True
+    assert data["llm"]["provider"] == "deepseek"
+    assert data["llm"]["active_model"] == "deepseek-chat-v2"
+    assert data["video"]["provider"] == "http"
+    assert data["app"]["debug"] is True
     assert data["video"]["http_provider"]["base_url"] == "https://example.com"
 
     content = env_file.read_text(encoding="utf-8")
@@ -133,7 +135,7 @@ async def test_system_ggk_import_endpoint_should_import_from_local_project(
 ):
     env_file = tmp_path / ".env"
     env_file.write_text("LLM_PROVIDER=openai\nVIDEO_PROVIDER=mock\n", encoding="utf-8")
-    monkeypatch.setattr(system_api, "_resolve_env_file_path", lambda: env_file)
+    monkeypatch.setattr(runtime_settings_service, "_resolve_env_file_path", lambda: env_file)
 
     fake_ggk_dir = tmp_path / "GGK"
     _build_fake_ggk_project(

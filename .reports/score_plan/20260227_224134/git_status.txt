@@ -1,0 +1,45 @@
+$ git -C /mnt/e/Code/AbiWorkflow status --short
+ M backend/app/api/assets.py
+ M backend/app/api/characters.py
+ M backend/app/api/composition.py
+ M backend/app/api/generation.py
+ M backend/app/api/projects.py
+ M backend/app/api/scenes.py
+ M backend/app/api/system.py
+ M backend/app/main.py
+ M backend/app/models/composition_task.py
+ M backend/app/models/video_clip.py
+ M backend/app/services/composition_state.py
+ M backend/app/services/script_parser.py
+ M backend/app/services/video_editor.py
+ M backend/app/services/video_generator.py
+ M backend/app/tasks/compose_tasks.py
+ M backend/app/tasks/generate_tasks.py
+ M backend/app/tasks/parse_tasks.py
+ M backend/tests/test_api/test_assets_and_system.py
+ D frontend/src/api/endpointSupport.ts
+ M frontend/src/api/system.ts
+ M frontend/src/components/TaskCenter/index.tsx
+ M frontend/src/pages/SystemSettings/index.tsx
+ M frontend/src/pages/TaskHub/index.tsx
+?? .reports/
+?? backend/app/clip_status.py
+?? backend/app/composition_status.py
+?? backend/app/generation_payload.py
+?? backend/app/project_status.py
+?? backend/app/scene_status.py
+?? backend/app/services/llm_json.py
+?? backend/app/services/runtime_settings.py
+?? backend/app/services/runtime_summary.py
+?? backend/app/services/video_editor_media.py
+?? backend/app/services/video_editor_types.py
+?? backend/tests/test_services/test_runtime_settings.py
+?? backend/tests/test_services/test_runtime_summary.py
+?? frontend/src/pages/SystemSettings/components/
+?? frontend/src/pages/SystemSettings/constants.ts
+?? frontend/src/pages/SystemSettings/formMapping.ts
+?? frontend/src/pages/SystemSettings/types.ts
+?? frontend/src/utils/taskPresentation.ts
+?? plans/
+?? score_plan.bat
+?? scripts/

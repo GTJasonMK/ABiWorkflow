@@ -8,6 +8,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.models import Character, Project, Scene, SceneCharacter, VideoClip
+from app.project_status import (
+    PROJECT_BUSY_STATUSES,
+    PROJECT_RESET_TO_PARSED_ON_CONTENT_CHANGE,
+    PROJECT_STATUS_PARSED,
+)
+from app.scene_status import SCENE_STATUS_PENDING
 from app.schemas.character import CharacterResponse, CharacterUpdate
 from app.schemas.common import ApiResponse
 from app.services.composition_state import mark_completed_compositions_stale
@@ -39,7 +45,7 @@ async def update_character(character_id: str, body: CharacterUpdate, db: AsyncSe
     project = (await db.execute(select(Project).where(Project.id == character.project_id))).scalar_one_or_none()
     if project is None:
         raise HTTPException(status_code=404, detail="项目不存在")
-    if project.status in {"parsing", "generating", "composing"}:
+    if project.status in PROJECT_BUSY_STATUSES:
         raise HTTPException(status_code=409, detail=f"项目状态 {project.status} 下不允许编辑角色")
 
     update_data = body.model_dump(exclude_unset=True)
@@ -79,10 +85,10 @@ async def update_character(character_id: str, body: CharacterUpdate, db: AsyncSe
                 select(Scene).where(Scene.id.in_(scene_ids))
             )).scalars().all()
             for scene in affected_scenes:
-                scene.status = "pending"
+                scene.status = SCENE_STATUS_PENDING
 
-            if project.status in {"completed", "failed"}:
-                project.status = "parsed"
+            if project.status in PROJECT_RESET_TO_PARSED_ON_CONTENT_CHANGE:
+                project.status = PROJECT_STATUS_PARSED
             await mark_completed_compositions_stale(db, project.id)
 
     await db.commit()
@@ -108,7 +114,7 @@ async def generate_character_portrait(character_id: str, db: AsyncSession = Depe
     project = (await db.execute(select(Project).where(Project.id == character.project_id))).scalar_one_or_none()
     if project is None:
         raise HTTPException(status_code=404, detail="项目不存在")
-    if project.status in {"parsing", "generating", "composing"}:
+    if project.status in PROJECT_BUSY_STATUSES:
         raise HTTPException(status_code=409, detail=f"项目状态 {project.status} 下不允许生成立绘")
 
     from app.services.portrait_generator import generate_portrait

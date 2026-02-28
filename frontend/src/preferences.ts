@@ -1,6 +1,6 @@
 const DEFAULT_HOME_KEY = 'abi_default_home_path'
 const DEFAULT_HOME = '/dashboard'
-const SUPPORTED_HOME_PATHS = ['/dashboard', '/projects', '/tasks', '/assets', '/settings', '/guide']
+const SUPPORTED_HOME_PATHS = ['/dashboard', '/projects', '/tasks', '/operations', '/settings', '/guide']
 
 export function listSupportedHomePaths(): string[] {
   return [...SUPPORTED_HOME_PATHS]

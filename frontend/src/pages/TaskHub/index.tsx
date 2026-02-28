@@ -1,80 +1,29 @@
 import { useMemo } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Badge, Button, Card, Empty, Space, Tag, Typography, App as AntdApp } from 'antd'
-import { DeleteOutlined, ReloadOutlined, RocketOutlined } from '@ant-design/icons'
-import { useTaskStore, type TaskItem } from '../../stores/taskStore'
+import { App as AntdApp, Button, Card, Empty, Space } from 'antd'
+import { ReloadOutlined, RocketOutlined } from '@ant-design/icons'
+import { useTaskStore } from '../../stores/taskStore'
 import PageHeader from '../../components/PageHeader'
-
-const { Text } = Typography
-
-function renderTaskType(taskType: TaskItem['taskType']): string {
-  if (taskType === 'parse') return '剧本解析'
-  if (taskType === 'generate') return '视频生成'
-  return '视频合成'
-}
-
-function renderStateLabel(state: string): string {
-  switch (state) {
-    case 'pending':
-    case 'queued':
-      return '排队中'
-    case 'started':
-    case 'processing':
-      return '执行中'
-    case 'success':
-    case 'completed':
-      return '已完成'
-    case 'failure':
-    case 'failed':
-      return '失败'
-    case 'timeout':
-      return '超时'
-    default:
-      return state
-  }
-}
-
-function renderStateClass(task: TaskItem): string {
-  if (!task.ready) return 'np-status-tag np-status-generating'
-  if (task.successful) return 'np-status-tag np-status-generated'
-  return 'np-status-tag np-status-failed'
-}
-
-function renderSummary(task: TaskItem): string | null {
-  if (!task.result || !task.successful) return null
-  if (task.taskType === 'parse') {
-    const scenes = Number(task.result.scene_count ?? 0)
-    const characters = Number(task.result.character_count ?? 0)
-    return `${characters} 角色 / ${scenes} 场景`
-  }
-  if (task.taskType === 'generate') {
-    const completed = Number(task.result.completed ?? 0)
-    const failed = Number(task.result.failed ?? 0)
-    return `${completed} 成功 / ${failed} 失败`
-  }
-  if (task.taskType === 'compose') {
-    const compositionId = String(task.result.composition_id ?? '')
-    return compositionId ? `合成编号 ${compositionId.slice(0, 12)}` : null
-  }
-  return null
-}
+import { cancelTaskRecord, dismissTaskRecord } from '../../api/tasks'
+import { getApiErrorMessage } from '../../utils/error'
+import TaskRecordList from '../../components/TaskRecordList'
+import { sortTaskRecordsByUpdatedAt, summarizeTaskRecords } from '../../utils/taskRecords'
+import useTaskRecords from '../../hooks/useTaskRecords'
 
 export default function TaskHub() {
   const navigate = useNavigate()
   const { message } = AntdApp.useApp()
-  const { tasks, refreshTask, removeTask, clearFinished, clearAll, setPanelOpen } = useTaskStore()
-
-  const sortedTasks = useMemo(
-    () => [...tasks].sort((a, b) => b.updatedAt - a.updatedAt),
-    [tasks],
-  )
-
-  const counts = useMemo(() => {
-    const running = sortedTasks.filter((item) => !item.ready).length
-    const failed = sortedTasks.filter((item) => item.ready && !item.successful).length
-    const success = sortedTasks.filter((item) => item.ready && item.successful).length
-    return { running, failed, success }
-  }, [sortedTasks])
+  const { setPanelOpen } = useTaskStore()
+  const { tasks, loading, refresh } = useTaskRecords({
+    enabled: true,
+    limit: 200,
+    includeDismissed: false,
+    onError: (error) => {
+      message.error(getApiErrorMessage(error, '加载后端任务记录失败'))
+    },
+  })
+  const sortedTasks = useMemo(() => sortTaskRecordsByUpdatedAt(tasks), [tasks])
+  const counts = useMemo(() => summarizeTaskRecords(sortedTasks), [sortedTasks])
 
   return (
     <section className="np-page">
@@ -85,8 +34,9 @@ export default function TaskHub() {
         actions={(
           <Space>
             <Button onClick={() => setPanelOpen(true)}>打开右侧抽屉</Button>
-            <Button danger onClick={clearFinished}>清理已完成</Button>
-            <Button danger onClick={clearAll}>清空全部</Button>
+            <Button icon={<ReloadOutlined />} loading={loading} onClick={() => void refresh({ showLoading: true })}>
+              刷新任务
+            </Button>
           </Space>
         )}
       />
@@ -118,49 +68,26 @@ export default function TaskHub() {
             </Empty>
           </Card>
         ) : (
-          <div className="np-task-list">
-            {sortedTasks.map((task) => {
-              const summary = renderSummary(task)
-              return (
-                <article key={task.taskId} className="np-task-item">
-                  <header className="np-task-item-head">
-                    <Space size={6}>
-                      <Tag className="np-status-tag">{renderTaskType(task.taskType)}</Tag>
-                      <Tag className={renderStateClass(task)}>{renderStateLabel(task.state)}</Tag>
-                      {!task.ready && <Badge status="processing" />}
-                    </Space>
-                    <Space size={6}>
-                      <Button
-                        size="small"
-                        icon={<ReloadOutlined />}
-                        onClick={async () => {
-                          try {
-                            await refreshTask(task.taskId)
-                          } catch (error) {
-                            message.error((error as Error).message || '刷新任务失败')
-                          }
-                        }}
-                      />
-                      <Button
-                        size="small"
-                        danger
-                        icon={<DeleteOutlined />}
-                        onClick={() => removeTask(task.taskId)}
-                      />
-                    </Space>
-                  </header>
-
-                  <div className="np-task-item-body">
-                    <Text type="secondary">项目：{task.projectId ? task.projectId.slice(0, 8) : '-'}</Text>
-                    <Text type="secondary">任务编号：{task.taskId.slice(0, 16)}</Text>
-                    <Text type="secondary">更新时间：{new Date(task.updatedAt).toLocaleString('zh-CN')}</Text>
-                    {summary && <Text type="secondary">结果：{summary}</Text>}
-                    {task.error && <Text className="np-task-error">{task.error}</Text>}
-                  </div>
-                </article>
-              )
-            })}
-          </div>
+          <TaskRecordList
+            tasks={sortedTasks}
+            mode="full"
+            onCancelTask={async (task) => {
+              try {
+                await cancelTaskRecord(task.id)
+                await refresh({ showLoading: false })
+              } catch (error) {
+                message.error(getApiErrorMessage(error, '取消任务失败'))
+              }
+            }}
+            onDismissTask={async (task) => {
+              try {
+                await dismissTaskRecord(task.id)
+                await refresh({ showLoading: false })
+              } catch (error) {
+                message.error(getApiErrorMessage(error, '忽略任务失败'))
+              }
+            }}
+          />
         )}
       </div>
     </section>

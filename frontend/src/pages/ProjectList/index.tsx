@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Button, Input, Modal, Form, Table, Tag, Space, Popconfirm, Tooltip, App as AntdApp } from 'antd'
-import { PlusOutlined, EditOutlined, DeleteOutlined, RightOutlined, CopyOutlined } from '@ant-design/icons'
+import { ApartmentOutlined, PlusOutlined, EditOutlined, DeleteOutlined, RightOutlined, CopyOutlined } from '@ant-design/icons'
 import type { ColumnsType, TableProps } from 'antd/es/table'
 import type { SorterResult } from 'antd/es/table/interface'
 import { useProjectStore } from '../../stores/projectStore'
@@ -176,7 +176,7 @@ export default function ProjectList() {
     {
       title: '操作',
       key: 'actions',
-      width: 150,
+      width: 190,
       fixed: 'right',
       render: (_, record) => (
         <Space size={4}>
@@ -193,6 +193,13 @@ export default function ProjectList() {
               type="primary"
               icon={<RightOutlined />}
               onClick={() => navigate(`/projects/${record.id}/${getTargetStepKey(record.status)}`)}
+            />
+          </Tooltip>
+          <Tooltip title="分镜模式">
+            <Button
+              size="small"
+              icon={<ApartmentOutlined />}
+              onClick={() => navigate(`/projects/${record.id}/scenes?mode=episode`)}
             />
           </Tooltip>
           <Tooltip title="复制项目">

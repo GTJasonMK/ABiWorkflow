@@ -7,15 +7,38 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.project_status import claim_project_status_or_409, try_restore_project_status
 from app.api.task_mode import resolve_async_mode
 from app.database import get_db
+from app.generation_payload import (
+    GEN_PAYLOAD_KEY_COMPLETED,
+    GEN_PAYLOAD_KEY_FAILED,
+    GEN_PAYLOAD_KEY_GENERATED,
+    GEN_PAYLOAD_KEY_TOTAL_SCENES,
+)
 from app.models import Project, Scene
+from app.project_status import (
+    PROJECT_GENERATE_ALLOWED_FROM,
+    PROJECT_STATUS_COMPLETED,
+    PROJECT_STATUS_DRAFT,
+    PROJECT_STATUS_FAILED,
+    PROJECT_STATUS_GENERATING,
+    PROJECT_STATUS_PARSED,
+    PROJECT_STATUS_PARSING,
+    PROJECT_STATUS_COMPOSING,
+    resolve_post_scene_generation_status,
+)
+from app.scene_status import (
+    READY_SCENE_STATUSES,
+    REGENERATABLE_SCENE_STATUSES,
+    SCENE_STATUS_COMPLETED,
+    SCENE_STATUS_FAILED,
+    SCENE_STATUS_PENDING,
+)
 from app.schemas.common import ApiResponse
 from app.services.composition_state import mark_completed_compositions_stale
+from app.services.task_records import create_task_record
 from app.services.video_generator import VideoGeneratorService
 from app.video_providers.registry import get_provider
 
 router = APIRouter(tags=["视频生成"])
-READY_SCENE_STATUSES = {"generated", "completed"}
-REGENERATABLE_SCENE_STATUSES = {"pending", "failed", "generating"}
 
 
 @router.post("/projects/{project_id}/generate", response_model=ApiResponse[dict])
@@ -41,7 +64,7 @@ async def start_generation(
     if force_regenerate:
         for s in scenes:
             if s.status in READY_SCENE_STATUSES:
-                s.status = "pending"
+                s.status = SCENE_STATUS_PENDING
         await db.flush()
 
     regeneratable_scenes = [s for s in scenes if s.status in REGENERATABLE_SCENE_STATUSES]
@@ -50,34 +73,34 @@ async def start_generation(
         titles = "、".join(empty_prompt_scenes[:5])
         raise HTTPException(status_code=400, detail=f"以下场景缺少视频提示词: {titles}")
 
-    if force_recover and project.status == "generating":
-        project.status = "parsed"
+    if force_recover and project.status == PROJECT_STATUS_GENERATING:
+        project.status = PROJECT_STATUS_PARSED
         await db.commit()
         await db.refresh(project)
 
-    if project.status in {"draft", "parsing", "composing"}:
+    if project.status in {PROJECT_STATUS_DRAFT, PROJECT_STATUS_PARSING, PROJECT_STATUS_COMPOSING}:
         raise HTTPException(status_code=409, detail=f"项目状态 {project.status} 不允许启动生成")
 
     # 无待生成场景时直接返回，避免不必要的状态切换与任务排队。
     all_ready = all(s.status in READY_SCENE_STATUSES for s in scenes)
     if not regeneratable_scenes and all_ready:
-        if project.status in {"failed", "generating"}:
-            project.status = "parsed"
+        if project.status in {PROJECT_STATUS_FAILED, PROJECT_STATUS_GENERATING}:
+            project.status = PROJECT_STATUS_PARSED
             await db.commit()
         return ApiResponse(data={
-            "total_scenes": len(scenes),
-            "completed": len(scenes),
-            "failed": 0,
+            GEN_PAYLOAD_KEY_TOTAL_SCENES: len(scenes),
+            GEN_PAYLOAD_KEY_COMPLETED: len(scenes),
+            GEN_PAYLOAD_KEY_FAILED: 0,
         })
 
     previous_status = project.status
     await claim_project_status_or_409(
         db,
         project_id=project_id,
-        target_status="generating",
-        allowed_from_statuses=["parsed", "failed", "completed"],
+        target_status=PROJECT_STATUS_GENERATING,
+        allowed_from_statuses=PROJECT_GENERATE_ALLOWED_FROM,
         action_label="启动生成",
-        recover_hint_status="generating",
+        recover_hint_status=PROJECT_STATUS_GENERATING,
     )
 
     async_mode = resolve_async_mode(async_mode)
@@ -89,6 +112,18 @@ async def start_generation(
             from app.tasks.generate_tasks import generate_videos_task
 
             task = generate_videos_task.delay(project_id, previous_status, force_regenerate)
+            await create_task_record(
+                db,
+                task_type="generate",
+                target_type="project",
+                target_id=project_id,
+                project_id=project_id,
+                source_task_id=task.id,
+                status="pending",
+                message="生成任务已排队",
+                payload={"project_id": project_id, "force_regenerate": force_regenerate},
+            )
+            await db.commit()
             return ApiResponse(data={"task_id": task.id, "mode": "async", "status": "queued"})
         except Exception as e:
             await try_restore_project_status(db, project_id, previous_status)
@@ -111,19 +146,19 @@ async def start_generation(
         all_done = all(s.status in READY_SCENE_STATUSES for s in scenes)
         project = (await db.execute(select(Project).where(Project.id == project_id))).scalar_one()
         if all_done:
-            project.status = "completed" if previous_status == "completed" else "parsed"
+            project.status = PROJECT_STATUS_COMPLETED if previous_status == PROJECT_STATUS_COMPLETED else PROJECT_STATUS_PARSED
         else:
-            project.status = "failed"
+            project.status = PROJECT_STATUS_FAILED
         await db.commit()
 
         return ApiResponse(data={
-            "total_scenes": len(scenes),
-            "completed": sum(1 for s in scenes if s.status in READY_SCENE_STATUSES),
-            "failed": sum(1 for s in scenes if s.status == "failed"),
+            GEN_PAYLOAD_KEY_TOTAL_SCENES: len(scenes),
+            GEN_PAYLOAD_KEY_COMPLETED: sum(1 for s in scenes if s.status in READY_SCENE_STATUSES),
+            GEN_PAYLOAD_KEY_FAILED: sum(1 for s in scenes if s.status == SCENE_STATUS_FAILED),
         })
     except Exception as e:
         project = (await db.execute(select(Project).where(Project.id == project_id))).scalar_one()
-        project.status = "failed" if previous_status != "completed" else "completed"
+        project.status = PROJECT_STATUS_FAILED if previous_status != PROJECT_STATUS_COMPLETED else PROJECT_STATUS_COMPLETED
         await db.commit()
         raise HTTPException(status_code=500, detail=f"视频生成失败: {e}")
 
@@ -143,12 +178,12 @@ async def retry_scene(scene_id: str, db: AsyncSession = Depends(get_db)):
     await claim_project_status_or_409(
         db,
         project_id=project.id,
-        target_status="generating",
-        allowed_from_statuses=["parsed", "failed", "completed"],
+        target_status=PROJECT_STATUS_GENERATING,
+        allowed_from_statuses=PROJECT_GENERATE_ALLOWED_FROM,
         action_label="重试场景生成",
     )
 
-    scene.status = "pending"
+    scene.status = SCENE_STATUS_PENDING
     await db.flush()
     generation_started = False
 
@@ -164,7 +199,7 @@ async def retry_scene(scene_id: str, db: AsyncSession = Depends(get_db)):
             select(Scene).where(Scene.project_id == scene.project_id)
         )).scalars().all()
         # 单场景重试后，只要项目内不存在失败场景，就保持为 parsed（可能仍有 pending 待后续批量生成）。
-        project.status = "failed" if any(s.status == "failed" for s in project_scenes) else "parsed"
+        project.status = PROJECT_STATUS_FAILED if any(s.status == SCENE_STATUS_FAILED for s in project_scenes) else PROJECT_STATUS_PARSED
         await db.commit()
 
         return ApiResponse(data={
@@ -179,8 +214,8 @@ async def retry_scene(scene_id: str, db: AsyncSession = Depends(get_db)):
             project.status = previous_status
         else:
             if scene.status not in READY_SCENE_STATUSES:
-                scene.status = "failed"
-            project.status = "failed" if previous_status != "completed" else "completed"
+                scene.status = SCENE_STATUS_FAILED
+            project.status = PROJECT_STATUS_FAILED if previous_status != PROJECT_STATUS_COMPLETED else PROJECT_STATUS_COMPLETED
         await db.commit()
         raise HTTPException(status_code=500, detail=f"场景重试失败: {e}")
 
@@ -203,8 +238,8 @@ async def generate_candidates(
     await claim_project_status_or_409(
         db,
         project_id=project.id,
-        target_status="generating",
-        allowed_from_statuses=["parsed", "failed", "completed"],
+        target_status=PROJECT_STATUS_GENERATING,
+        allowed_from_statuses=PROJECT_GENERATE_ALLOWED_FROM,
         action_label="生成候选片段",
     )
 
@@ -219,21 +254,21 @@ async def generate_candidates(
         clips = await generator.generate_candidates(scene, candidate_count, db)
 
         # 恢复项目状态
-        project.status = previous_status if previous_status in {"parsed", "completed"} else "parsed"
+        project.status = resolve_post_scene_generation_status(previous_status)
         await db.commit()
 
-        generated_count = sum(1 for c in clips if c.status == "completed")
-        failed_count = sum(1 for c in clips if c.status == "failed")
+        generated_count = sum(1 for c in clips if c.status == SCENE_STATUS_COMPLETED)
+        failed_count = sum(1 for c in clips if c.status == SCENE_STATUS_FAILED)
 
         return ApiResponse(data={
             "scene_id": scene_id,
-            "generated": generated_count,
-            "failed": failed_count,
+            GEN_PAYLOAD_KEY_GENERATED: generated_count,
+            GEN_PAYLOAD_KEY_FAILED: failed_count,
         })
     except Exception as e:
         if not generation_started:
             project.status = previous_status
         else:
-            project.status = previous_status if previous_status in {"parsed", "completed"} else "parsed"
+            project.status = resolve_post_scene_generation_status(previous_status)
         await db.commit()
         raise HTTPException(status_code=500, detail=f"候选生成失败: {e}")

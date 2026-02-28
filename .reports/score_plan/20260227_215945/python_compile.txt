@@ -1,0 +1,1 @@
+$ cd '/mnt/e/Code/AbiWorkflow' && python3 -m py_compile $(find backend/app backend/tests -type f -name '*.py')

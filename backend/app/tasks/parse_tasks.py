@@ -1,20 +1,38 @@
 from __future__ import annotations
 
+from app.project_status import PROJECT_STATUS_DRAFT, PROJECT_STATUS_PARSING
 from app.services.progress import publish_progress
 from app.tasks.celery_app import celery_app
+from app.tasks.task_record_sync import sync_task_record_status
 from app.tasks.status_recovery import restore_project_status_after_task_failure, run_async_in_new_loop
+from app.task_record_status import TASK_RECORD_STATUS_COMPLETED, TASK_RECORD_STATUS_FAILED, TASK_RECORD_STATUS_RUNNING
 
 
 @celery_app.task(bind=True, name="parse_script")
-def parse_script_task(self, project_id: str, previous_status: str = "draft", script_text: str | None = None):
+def parse_script_task(self, project_id: str, previous_status: str = PROJECT_STATUS_DRAFT, script_text: str | None = None):
     """异步剧本解析任务"""
     from app.config import reload_settings
     reload_settings()
+    run_async_in_new_loop(sync_task_record_status(
+        source_task_id=self.request.id,
+        status=TASK_RECORD_STATUS_RUNNING,
+        progress_percent=2.0,
+        message="解析任务开始执行",
+        event_type="worker_started",
+    ))
 
     publish_progress(project_id, "parse_start", {"message": "开始解析剧本", "percent": 2})
 
     try:
         result = run_async_in_new_loop(_run_parse(project_id, previous_status, script_text))
+        run_async_in_new_loop(sync_task_record_status(
+            source_task_id=self.request.id,
+            status=TASK_RECORD_STATUS_COMPLETED,
+            progress_percent=100.0,
+            message="解析任务完成",
+            result=result,
+            event_type="worker_completed",
+        ))
 
         publish_progress(project_id, "parse_complete", {
             "message": "解析完成",
@@ -25,9 +43,17 @@ def parse_script_task(self, project_id: str, previous_status: str = "draft", scr
         return result
 
     except Exception as e:
+        run_async_in_new_loop(sync_task_record_status(
+            source_task_id=self.request.id,
+            status=TASK_RECORD_STATUS_FAILED,
+            progress_percent=100.0,
+            message="解析任务失败",
+            error_message=str(e),
+            event_type="worker_failed",
+        ))
         restore_project_status_after_task_failure(
             project_id,
-            "parsing",
+            PROJECT_STATUS_PARSING,
             previous_status,
             task_name="解析任务",
         )

@@ -1,0 +1,1 @@
+$ cd '/mnt/e/Code/AbiWorkflow' && rg -n "\"pending\"|\"generating\"|\"generated\"|\"completed\"|\"failed\"|\"draft\"|\"parsing\"|\"parsed\"|\"composing\"" backend/app/api backend/app/services backend/app/tasks -g'*.py' -S

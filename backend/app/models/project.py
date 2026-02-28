@@ -31,3 +31,9 @@ class Project(Base):
     composition_tasks: Mapped[list["CompositionTask"]] = relationship(
         "CompositionTask", back_populates="project", cascade="all, delete-orphan"
     )
+    episodes: Mapped[list["Episode"]] = relationship(
+        "Episode", back_populates="project", cascade="all, delete-orphan", order_by="Episode.episode_order"
+    )
+    panels: Mapped[list["Panel"]] = relationship(
+        "Panel", back_populates="project", cascade="all, delete-orphan", order_by="Panel.panel_order"
+    )

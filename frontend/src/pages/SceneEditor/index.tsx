@@ -1,6 +1,6 @@
 import { useCallback, useEffect } from 'react'
-import { useParams, useNavigate } from 'react-router-dom'
-import { Button, Space, Spin, Empty, App as AntdApp } from 'antd'
+import { useParams, useNavigate, useSearchParams } from 'react-router-dom'
+import { Button, Space, Spin, Empty, App as AntdApp, Segmented, Card } from 'antd'
 import { PlayCircleOutlined } from '@ant-design/icons'
 import {
   DndContext,
@@ -25,6 +25,7 @@ import CharacterPanel from './CharacterPanel'
 import PageHeader from '../../components/PageHeader'
 import WorkflowSteps from '../../components/WorkflowSteps'
 import { getApiErrorMessage } from '../../utils/error'
+import EpisodePanelBoard from './EpisodePanelBoard'
 
 /** 可排序的场景卡片包装器 */
 function SortableSceneCard({ scene, projectId }: { scene: Scene; projectId: string }) {
@@ -57,8 +58,10 @@ function SortableSceneCard({ scene, projectId }: { scene: Scene; projectId: stri
 export default function SceneEditor() {
   const { id: projectId } = useParams<{ id: string }>()
   const navigate = useNavigate()
+  const [searchParams, setSearchParams] = useSearchParams()
   const { scenes, characters, loading, fetchScenes, fetchCharacters, reorderScenes } = useSceneStore()
   const { message } = AntdApp.useApp()
+  const editorMode: 'scene' | 'episode' = searchParams.get('mode') === 'episode' ? 'episode' : 'scene'
 
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 8 } }),
@@ -94,7 +97,7 @@ export default function SceneEditor() {
     [scenes, projectId, reorderScenes, message],
   )
 
-  if (loading) {
+  if (loading && editorMode === 'scene') {
     return (
       <div className="np-page-loading">
         <Spin size="large" />
@@ -125,39 +128,65 @@ export default function SceneEditor() {
         )}
       />
 
-      <div className="np-scene-editor-layout">
-        {scenes.length === 0 ? (
-          <div className="np-scene-empty">
-            <Empty description="暂无场景数据，请先解析剧本" />
+      <div className="np-page-scroll">
+        <Card className="np-panel-card" styles={{ body: { padding: 12 } }}>
+          <Segmented
+            value={editorMode}
+            options={[
+              { label: '场景模式', value: 'scene' },
+              { label: '分集分镜模式', value: 'episode' },
+            ]}
+            onChange={(value) => {
+              const nextMode = value as 'scene' | 'episode'
+              const nextParams = new URLSearchParams(searchParams)
+              if (nextMode === 'episode') {
+                nextParams.set('mode', 'episode')
+              } else {
+                nextParams.delete('mode')
+              }
+              setSearchParams(nextParams, { replace: true })
+            }}
+          />
+        </Card>
+
+        {editorMode === 'scene' ? (
+          <div className="np-scene-editor-layout">
+            {scenes.length === 0 ? (
+              <div className="np-scene-empty">
+                <Empty description="暂无场景数据，请先解析剧本" />
+              </div>
+            ) : (
+              <>
+                <section className="np-scene-column np-scene-column-main">
+                  <div className="np-scene-column-scroll">
+                    <DndContext
+                      sensors={sensors}
+                      collisionDetection={closestCenter}
+                      onDragEnd={handleDragEnd}
+                    >
+                      <SortableContext
+                        items={scenes.map((s) => s.id)}
+                        strategy={verticalListSortingStrategy}
+                      >
+                        {scenes.map((scene) => (
+                          <SortableSceneCard
+                            key={scene.id}
+                            scene={scene}
+                            projectId={projectId!}
+                          />
+                        ))}
+                      </SortableContext>
+                    </DndContext>
+                  </div>
+                </section>
+                <aside className="np-scene-column np-scene-column-side">
+                  <CharacterPanel characters={characters} />
+                </aside>
+              </>
+            )}
           </div>
         ) : (
-          <>
-            <section className="np-scene-column np-scene-column-main">
-              <div className="np-scene-column-scroll">
-                <DndContext
-                  sensors={sensors}
-                  collisionDetection={closestCenter}
-                  onDragEnd={handleDragEnd}
-                >
-                  <SortableContext
-                    items={scenes.map((s) => s.id)}
-                    strategy={verticalListSortingStrategy}
-                  >
-                    {scenes.map((scene) => (
-                      <SortableSceneCard
-                        key={scene.id}
-                        scene={scene}
-                        projectId={projectId!}
-                      />
-                    ))}
-                  </SortableContext>
-                </DndContext>
-              </div>
-            </section>
-            <aside className="np-scene-column np-scene-column-side">
-              <CharacterPanel characters={characters} />
-            </aside>
-          </>
+          projectId ? <EpisodePanelBoard projectId={projectId} /> : <Empty description="项目参数缺失" />
         )}
       </div>
     </section>

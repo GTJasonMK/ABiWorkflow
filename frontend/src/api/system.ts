@@ -7,22 +7,12 @@ export interface HealthPayload {
 }
 
 export interface RuntimeSummaryPayload {
-  app_name: string
-  debug: boolean
-  llm_provider: string
-  llm_model: string
-  llm_key_configured: boolean
-  video_provider: string
-  redis_url: string
-  celery_worker_online: boolean
-  video_output_dir: string
-  composition_output_dir: string
-  app?: {
+  app: {
     name: string
     debug: boolean
     database_url: string
   }
-  llm?: {
+  llm: {
     provider: string
     active_model: string
     any_key_configured: boolean
@@ -50,13 +40,13 @@ export interface RuntimeSummaryPayload {
       api_key_preview: string | null
     }
   }
-  queue?: {
+  queue: {
     redis_url: string
     celery_broker_url: string
     celery_result_backend: string
     celery_worker_online: boolean
   }
-  video?: {
+  video: {
     provider: string
     output_dir: string
     composition_output_dir: string
@@ -161,101 +151,11 @@ function extractWrappedData<T>(payload: unknown): T | null {
 }
 
 function normalizeRuntimeSummary(payload: RuntimeSummaryPayload): RuntimeSummaryPayload {
-  const appName = payload.app?.name ?? payload.app_name ?? 'AbiWorkflow'
-  const debug = payload.app?.debug ?? payload.debug ?? false
-  const llmSource = payload.llm
-  const videoSource = payload.video
-  const llmProvider = llmSource?.provider ?? payload.llm_provider ?? 'unknown'
-  const llmModel = llmSource?.active_model ?? payload.llm_model ?? 'unknown'
-  const llmKeyConfigured = llmSource?.any_key_configured ?? payload.llm_key_configured ?? false
-  const videoProvider = videoSource?.provider ?? payload.video_provider ?? 'unknown'
-  const redisUrl = payload.queue?.redis_url ?? payload.redis_url ?? 'unknown'
-  const celeryWorkerOnline = payload.queue?.celery_worker_online ?? payload.celery_worker_online ?? false
-  const videoOutputDir = videoSource?.output_dir ?? payload.video_output_dir ?? 'unknown'
-  const compositionOutputDir = videoSource?.composition_output_dir ?? payload.composition_output_dir ?? 'unknown'
-
-  return {
-    ...payload,
-    app_name: appName,
-    debug,
-    llm_provider: llmProvider,
-    llm_model: llmModel,
-    llm_key_configured: llmKeyConfigured,
-    video_provider: videoProvider,
-    redis_url: redisUrl,
-    celery_worker_online: celeryWorkerOnline,
-    video_output_dir: videoOutputDir,
-    composition_output_dir: compositionOutputDir,
-    app: payload.app ?? {
-      name: appName,
-      debug,
-      database_url: 'unknown',
-    },
-    llm: {
-      provider: llmProvider,
-      active_model: llmModel,
-      any_key_configured: llmKeyConfigured,
-      openai: llmSource?.openai ?? {
-        model: 'unknown',
-        base_url: null,
-        api_key_configured: false,
-        api_key_preview: null,
-      },
-      anthropic: llmSource?.anthropic ?? {
-        model: 'unknown',
-        api_key_configured: false,
-        api_key_preview: null,
-      },
-      deepseek: llmSource?.deepseek ?? {
-        model: 'unknown',
-        base_url: null,
-        api_key_configured: false,
-        api_key_preview: null,
-      },
-      ggk: llmSource?.ggk ?? {
-        base_url: '',
-        text_model: 'grok-3',
-        api_key_configured: false,
-        api_key_preview: null,
-      },
-    },
-    queue: payload.queue ?? {
-      redis_url: redisUrl,
-      celery_broker_url: 'unknown',
-      celery_result_backend: 'unknown',
-      celery_worker_online: celeryWorkerOnline,
-    },
-    video: {
-      provider: videoProvider,
-      output_dir: videoOutputDir,
-      composition_output_dir: compositionOutputDir,
-      provider_max_duration_seconds: videoSource?.provider_max_duration_seconds ?? 0,
-      poll_interval_seconds: videoSource?.poll_interval_seconds ?? 0,
-      task_timeout_seconds: videoSource?.task_timeout_seconds ?? 0,
-      tts_voice: videoSource?.tts_voice ?? 'unknown',
-      http_provider: videoSource?.http_provider ?? {
-        base_url: '',
-        api_key_configured: false,
-        api_key_preview: null,
-        generate_path: '',
-        status_path: '',
-        task_id_path: '',
-        status_value_path: '',
-        progress_path: '',
-        result_url_path: '',
-        error_path: '',
-        request_timeout_seconds: 0,
-      },
-      ggk_provider: videoSource?.ggk_provider ?? {
-        video_model: 'grok-imagine-1.0-video',
-        aspect_ratio: '16:9',
-        resolution: 'SD',
-        preset: 'normal',
-        model_duration_profiles: '',
-        request_timeout_seconds: 0,
-      },
-    },
+  const { app, llm, queue, video } = payload
+  if (!app || !llm || !queue || !video) {
+    throw new Error('获取运行配置失败：响应字段缺失')
   }
+  return payload
 }
 
 /** 获取后端健康状态 */

@@ -1,0 +1,1 @@
+$ cd '/mnt/e/Code/AbiWorkflow' && rg -n "function renderTaskType|function renderStateLabel|function renderStateClass|function render(Result)?Summary" frontend/src/pages/TaskHub/index.tsx frontend/src/components/TaskCenter/index.tsx -S

@@ -11,8 +11,15 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.clip_status import CLIP_STATUS_COMPLETED, CLIP_STATUS_FAILED
 from app.config import resolve_runtime_path, settings
 from app.models import Scene, SceneCharacter, VideoClip
+from app.scene_status import (
+    REGENERATABLE_SCENE_STATUSES,
+    SCENE_STATUS_FAILED,
+    SCENE_STATUS_GENERATED,
+    SCENE_STATUS_GENERATING,
+)
 from app.services.progress import publish_progress
 from app.video_providers.base import VideoGenerateRequest, VideoProvider
 
@@ -86,7 +93,7 @@ class VideoGeneratorService:
         while True:
             status = await self._provider.poll_status(task_id)
             normalized = status.status.lower()
-            if normalized in {"completed", "failed", "error", "canceled", "cancelled"}:
+            if normalized in {CLIP_STATUS_COMPLETED, CLIP_STATUS_FAILED, "error", "canceled", "cancelled"}:
                 return status
 
             if (time.monotonic() - start) >= self._task_timeout_seconds:
@@ -106,7 +113,7 @@ class VideoGeneratorService:
 
         # 重试前清理旧片段，避免重复拼接
         await db.execute(delete(VideoClip).where(VideoClip.scene_id == scene_with_relations.id))
-        scene_with_relations.status = "generating"
+        scene_with_relations.status = SCENE_STATUS_GENERATING
         await db.flush()
 
         reference_image_url = self._pick_reference_image(scene_with_relations)
@@ -118,7 +125,7 @@ class VideoGeneratorService:
                 task_id = await self._provider.generate(req)
                 status = await self._wait_for_completion(task_id)
 
-                if status.status.lower() == "completed":
+                if status.status.lower() == CLIP_STATUS_COMPLETED:
                     project_dir = self._output_dir / scene_with_relations.project_id
                     project_dir.mkdir(parents=True, exist_ok=True)
                     output_path = project_dir / f"{scene_with_relations.id}_{idx}_{task_id}.mp4"
@@ -129,7 +136,7 @@ class VideoGeneratorService:
                         file_path=str(local_file),
                         duration_seconds=req.duration_seconds,
                         provider_task_id=task_id,
-                        status="completed",
+                        status=CLIP_STATUS_COMPLETED,
                     )
                 else:
                     clip = VideoClip(
@@ -137,7 +144,7 @@ class VideoGeneratorService:
                         clip_order=idx,
                         duration_seconds=req.duration_seconds,
                         provider_task_id=task_id,
-                        status="failed",
+                        status=CLIP_STATUS_FAILED,
                         error_message=status.error_message or f"任务状态: {status.status}",
                     )
             except Exception as e:
@@ -146,7 +153,7 @@ class VideoGeneratorService:
                     scene_id=scene_with_relations.id,
                     clip_order=idx,
                     duration_seconds=req.duration_seconds,
-                    status="failed",
+                    status=CLIP_STATUS_FAILED,
                     error_message=str(e),
                 )
 
@@ -154,8 +161,8 @@ class VideoGeneratorService:
             clips.append(clip)
 
         # 更新场景状态
-        all_completed = all(c.status == "completed" for c in clips)
-        scene_with_relations.status = "generated" if all_completed else "failed"
+        all_completed = all(c.status == CLIP_STATUS_COMPLETED for c in clips)
+        scene_with_relations.status = SCENE_STATUS_GENERATED if all_completed else SCENE_STATUS_FAILED
         await db.flush()
 
         return clips
@@ -207,7 +214,7 @@ class VideoGeneratorService:
                     task_id = await self._provider.generate(req)
                     status = await self._wait_for_completion(task_id)
 
-                    if status.status.lower() == "completed":
+                    if status.status.lower() == CLIP_STATUS_COMPLETED:
                         project_dir = self._output_dir / scene_with_relations.project_id
                         project_dir.mkdir(parents=True, exist_ok=True)
                         output_path = project_dir / f"{scene_with_relations.id}_{clip_order}_c{candidate_idx}_{task_id}.mp4"
@@ -220,7 +227,7 @@ class VideoGeneratorService:
                             file_path=str(local_file),
                             duration_seconds=req.duration_seconds,
                             provider_task_id=task_id,
-                            status="completed",
+                            status=CLIP_STATUS_COMPLETED,
                         )
                     else:
                         clip = VideoClip(
@@ -230,7 +237,7 @@ class VideoGeneratorService:
                             is_selected=False,
                             duration_seconds=req.duration_seconds,
                             provider_task_id=task_id,
-                            status="failed",
+                            status=CLIP_STATUS_FAILED,
                             error_message=status.error_message or f"任务状态: {status.status}",
                         )
                 except Exception as e:
@@ -244,7 +251,7 @@ class VideoGeneratorService:
                         candidate_index=candidate_idx,
                         is_selected=False,
                         duration_seconds=duration,
-                        status="failed",
+                        status=CLIP_STATUS_FAILED,
                         error_message=str(e),
                     )
 
@@ -259,7 +266,7 @@ class VideoGeneratorService:
         stmt = (
             select(Scene)
             # 兼容异常中断后遗留的 generating 状态，允许后续重跑恢复。
-            .where(Scene.project_id == project_id, Scene.status.in_(["pending", "failed", "generating"]))
+            .where(Scene.project_id == project_id, Scene.status.in_(list(REGENERATABLE_SCENE_STATUSES)))
             .options(selectinload(Scene.characters).selectinload(SceneCharacter.character))
             .order_by(Scene.sequence_order)
         )

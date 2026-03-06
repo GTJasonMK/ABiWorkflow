@@ -70,8 +70,10 @@ export default function ProviderKeyPromptModal({
 
   useEffect(() => {
     if (!open) return
-    setValue(defaultValue)
-    setRecentKeys(readRecentKeys(recentStorageKey))
+    const recent = readRecentKeys(recentStorageKey)
+    setRecentKeys(recent)
+    // 优先自动填充最近使用的 key，减少重复输入
+    setValue(recent.length > 0 && recent[0] ? recent[0] : defaultValue)
   }, [open, defaultValue, recentStorageKey])
 
   const recentOptions = useMemo(
@@ -106,7 +108,7 @@ export default function ProviderKeyPromptModal({
       okText={okText}
       cancelText={cancelText}
       confirmLoading={submitting}
-      destroyOnClose
+      destroyOnHidden
     >
       <Space direction="vertical" size={10} style={{ width: '100%' }}>
         {description ? <Text type="secondary">{description}</Text> : null}

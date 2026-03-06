@@ -18,6 +18,11 @@
   box-sizing: border-box;
 }
 
+*:focus-visible {
+  outline: 2px solid var(--np-accent);
+  outline-offset: 2px;
+}
+
 html,
 body,
 #root {
@@ -145,6 +150,15 @@ a {
   border-inline-end: 0 !important;
 }
 
+.np-sider-menu .ant-menu-item-group-title {
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--np-text-soft);
+  padding: 16px 24px 4px;
+  font-weight: 600;
+}
+
 .np-content {
   background: rgba(249, 249, 247, 0.95) !important;
   border: 1px solid var(--np-frame-line);
@@ -180,6 +194,11 @@ a {
   padding-right: 4px;
 }
 
+.np-scene-editor-page-scroll {
+  overflow: hidden;
+  padding-right: 0;
+}
+
 .np-page-loading {
   height: 100%;
   display: grid;
@@ -200,9 +219,557 @@ a {
 }
 
 .np-script-workspace {
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.np-script-workspace.np-page-scroll {
+  overflow: hidden;
+  padding-right: 0;
+}
+
+.np-script-episode-grid-card {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  margin-bottom: 0;
+}
+
+.np-script-episode-grid-card .ant-card-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.np-script-episode-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 12px;
+}
+
+.np-script-episode-status-card {
+  margin-bottom: 0;
+}
+
+.np-script-episode-entry-card {
+  cursor: pointer;
+  transition: border-color 0.2s ease, transform 0.2s ease;
+}
+
+.np-script-episode-entry-card:hover {
+  border-color: var(--np-ink-soft);
+  transform: translateY(-1px);
+}
+
+.np-script-episode-summary {
+  margin: 0 !important;
+  min-height: 48px;
+  max-height: 120px;
+  overflow-y: auto;
+  color: var(--np-text-soft);
+  white-space: pre-wrap;
+}
+
+.np-script-console {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(200px, 260px) minmax(0, 1fr);
+  gap: 12px;
+}
+
+.np-script-episode-panel,
+.np-script-episode-content {
+  margin-bottom: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.np-script-episode-panel .ant-card-body,
+.np-script-episode-content .ant-card-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.np-script-episode-panel .ant-card-head-wrapper,
+.np-script-episode-content .ant-card-head-wrapper {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.np-script-episode-panel .ant-card-head-title,
+.np-script-episode-content .ant-card-head-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.np-script-episode-panel .ant-card-extra,
+.np-script-episode-content .ant-card-extra {
+  margin-inline-start: 0 !important;
+  max-width: 100%;
+}
+
+.np-script-episode-actions.ant-space {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  max-width: 100%;
+}
+
+.np-script-episode-delete-btn.ant-btn {
+  max-width: 100%;
+}
+
+.np-script-episode-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  display: flex;
+  flex-direction: column;
+  padding-right: 2px;
+}
+
+.np-script-episode-scroll::-webkit-scrollbar {
+  width: 8px;
+}
+
+.np-script-episode-scroll::-webkit-scrollbar-thumb {
+  background: #999;
+  border-radius: 0;
+}
+
+.np-script-episode-scroll::-webkit-scrollbar-track {
+  background: #ecece8;
+}
+
+.np-script-episode-editor {
+  flex: 1;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   gap: 10px;
+  overflow: hidden;
+}
+
+.np-script-episode-input.ant-input {
+  flex: 1 1 auto;
+  min-height: 0;
+  height: 100% !important;
+  max-height: none;
+  line-height: 1.75;
+  overflow-y: auto !important;
+  resize: none;
+}
+
+@media (max-width: 1080px) {
+  .np-script-episode-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .np-script-console {
+    grid-template-columns: 1fr;
+    flex-basis: clamp(280px, 48%, 520px);
+  }
+
+  .np-script-episode-panel {
+    max-height: 240px;
+  }
+}
+
+.np-script-asset-console {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  margin-bottom: 0;
+}
+
+.np-script-asset-console-host {
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.np-script-asset-console-host.is-embedded {
+  border: 1px solid var(--np-frame-line);
+  background: rgba(249, 249, 247, 0.9);
+}
+
+.np-script-asset-console-toolbar {
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--np-frame-line);
+  background: rgba(249, 249, 247, 0.95);
+}
+
+.np-script-asset-console-toolbar .ant-space {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.np-script-asset-console-embedded {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.np-script-asset-console.is-focus-pulse {
+  border-color: var(--np-accent) !important;
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--np-accent) 35%, transparent);
+  animation: npConsolePulse 0.9s ease-out;
+}
+
+@keyframes npConsolePulse {
+  0% {
+    transform: translateY(0);
+  }
+  40% {
+    transform: translateY(-1px);
+  }
+  100% {
+    transform: translateY(0);
+  }
+}
+
+.np-script-asset-console > .ant-card-body {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.np-script-asset-console .ant-tabs {
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.np-script-asset-console-embedded .ant-tabs {
+  flex: 1;
+}
+
+.np-script-asset-console .ant-tabs-content-holder,
+.np-script-asset-console .ant-tabs-content,
+.np-script-asset-console .ant-tabs-tabpane {
+  height: 100%;
+  min-height: 0;
+}
+
+.np-script-asset-console-grid {
+  height: 100%;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(260px, 300px) minmax(0, 1fr);
+  gap: 12px;
+}
+
+.np-script-asset-pane {
+  border: 1px solid var(--np-frame-line);
+  background: rgba(249, 249, 247, 0.74);
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.np-script-asset-pane-head {
+  min-height: 38px;
+  display: flex;
+  align-items: center;
+  padding: 0 10px;
+  border-bottom: 1px solid var(--np-frame-line);
+  background: rgba(249, 249, 247, 0.88);
+}
+
+.np-script-asset-pane-body {
+  flex: 1;
+  min-height: 0;
+  padding: 10px;
+  overflow-y: scroll;
+  overflow-x: hidden;
+  scrollbar-gutter: stable;
+}
+
+.np-script-asset-pane-body::-webkit-scrollbar {
+  width: 8px;
+}
+
+.np-script-asset-pane-body::-webkit-scrollbar-thumb {
+  background: #999;
+  border-radius: 0;
+}
+
+.np-script-asset-pane-body::-webkit-scrollbar-track {
+  background: #ecece8;
+}
+
+.np-script-entity-item {
+  cursor: pointer;
+  background: transparent;
+  padding-inline: 8px;
+  transition: background 0.15s ease;
+}
+
+.np-script-entity-item:hover {
+  background: var(--np-muted);
+}
+
+.np-script-entity-item.is-active {
+  background: var(--np-muted);
+}
+
+.np-script-entity-item .np-script-entity-meta {
+  display: none;
+  margin-top: 2px;
+}
+
+.np-script-entity-item:hover .np-script-entity-meta,
+.np-script-entity-item.is-active .np-script-entity-meta {
+  display: block;
+}
+
+.np-script-asset-binding-block {
+  padding-top: 8px;
+  border-top: 1px solid var(--np-muted);
+}
+
+.np-script-binding-item {
+  padding-inline: 0 !important;
+}
+
+.np-script-binding-item.is-primary {
+  background: rgba(17, 17, 17, 0.03);
+}
+
+.np-script-binding-row {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.np-script-binding-actions .ant-btn {
+  min-height: 24px;
+  height: 24px;
+  padding-inline: 4px;
+  text-transform: none;
+  letter-spacing: 0;
+  font-size: 11px;
+}
+
+.np-script-asset-meta-toggle {
+  padding-top: 2px;
+  border-top: 1px dashed var(--np-muted);
+}
+
+.np-script-asset-meta-toggle .ant-btn {
+  padding-inline: 0;
+  height: auto;
+}
+
+.np-script-asset-meta-block {
+  border: 1px dashed var(--np-frame-line);
+  background: rgba(249, 249, 247, 0.58);
+  padding: 10px;
+}
+
+@media (max-width: 1080px) {
+  .np-script-asset-console-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* 剧本页减压：缩顶部密度、弱化边框、增加留白 */
+.np-script-page .np-page-header {
+  margin-bottom: 12px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--np-frame-line);
+  gap: 10px;
+}
+
+.np-script-page .np-page-nav-row {
+  gap: 10px;
+  margin-bottom: 6px;
+  flex-wrap: wrap;
+}
+
+.np-script-page .np-workflow-steps.ant-steps {
+  min-width: 0;
+}
+
+.np-script-page .np-workflow-steps .ant-steps-item {
+  margin-inline-end: 12px !important;
+}
+
+.np-script-page .np-workflow-steps .ant-steps-item-icon {
+  width: 22px !important;
+  height: 22px !important;
+  line-height: 20px !important;
+  margin-top: 1px;
+}
+
+.np-script-page .np-workflow-steps .ant-steps-item-title {
+  font-size: 11px !important;
+  line-height: 22px !important;
+}
+
+.np-script-page .np-page-actions .ant-btn {
+  min-height: 32px;
+  height: 32px;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  padding-inline: 10px;
+}
+
+.np-script-page .np-page-actions .ant-space {
+  gap: 6px !important;
+}
+
+.np-script-page .np-panel-card {
+  border-color: var(--np-frame-line) !important;
+  box-shadow: none;
+  background: rgba(249, 249, 247, 0.9);
+}
+
+.np-script-page .np-panel-card .ant-card-head {
+  border-bottom: 1px solid var(--np-frame-line) !important;
+  min-height: 42px;
+  padding-inline: 12px;
+}
+
+.np-script-page .np-panel-card .ant-card-body {
+  padding: 12px;
+}
+
+.np-asset-binding-scroll.np-page-scroll {
+  overflow: hidden;
+  padding-right: 0;
+}
+
+.np-asset-binding-main {
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding-right: 2px;
+}
+
+.np-asset-binding-main > .np-panel-card {
+  margin-bottom: 0;
+}
+
+.np-asset-binding-main::-webkit-scrollbar {
+  width: 8px;
+}
+
+.np-asset-binding-main::-webkit-scrollbar-thumb {
+  background: #999;
+  border-radius: 0;
+}
+
+.np-asset-binding-main::-webkit-scrollbar-track {
+  background: #ecece8;
+}
+
+.np-asset-binding-mode-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+  justify-content: space-between;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--np-muted);
+}
+
+.np-asset-generation-shell {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.np-asset-generation-section {
+  border: 1px solid var(--np-frame-line);
+  background: rgba(249, 249, 247, 0.72);
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 0;
+}
+
+.np-asset-binding-console-placeholder .ant-card-body {
+  padding-block: 12px;
+}
+
+.np-asset-binding-main .np-script-asset-console {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.np-asset-binding-main .np-script-asset-console-host {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.np-asset-binding-footer-bar {
+  flex-shrink: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--np-frame-line);
+  background: rgba(249, 249, 247, 0.96);
+}
+
+.np-asset-binding-script-preview {
+  margin: 0 !important;
+  max-height: 170px;
+  overflow-y: scroll;
+  overflow-x: hidden;
+  scrollbar-gutter: stable;
+  white-space: pre-wrap;
+}
+
+@media (max-width: 1080px) {
+  .np-asset-generation-shell {
+    grid-template-columns: 1fr;
+  }
+
+  .np-asset-binding-mode-row {
+    align-items: flex-start;
+  }
+
+  .np-asset-binding-footer-bar {
+    align-items: stretch;
+  }
+
+  .np-asset-binding-footer-bar .ant-btn {
+    width: 100%;
+  }
 }
 
 .np-page-header {
@@ -234,6 +801,13 @@ a {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
+  max-width: 100%;
+}
+
+.np-page-actions .ant-space {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  max-width: 100%;
 }
 
 .np-dashboard-grid {
@@ -279,9 +853,19 @@ a {
 .np-scene-editor-layout {
   flex: 1;
   min-height: 0;
+  height: 100%;
   display: grid;
-  grid-template-columns: minmax(0, 1.7fr) minmax(320px, 1fr);
+  grid-template-columns: minmax(200px, 260px) minmax(0, 1fr);
   gap: 12px;
+  overflow: hidden;
+}
+
+.np-scene-column-side {
+  min-width: 0;
+}
+
+.np-scene-column-main {
+  min-width: 0;
 }
 
 .np-scene-empty {
@@ -298,6 +882,127 @@ a {
   box-shadow: var(--np-surface-shadow);
   display: flex;
   flex-direction: column;
+}
+
+.np-scene-episode-card,
+.np-scene-panel-card {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.np-scene-episode-card .ant-card-body,
+.np-scene-panel-card .ant-card-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.np-episode-list-scroll,
+.np-panel-list-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: scroll;
+  overflow-x: hidden;
+  padding-right: 4px;
+  scrollbar-gutter: stable;
+}
+
+.np-episode-list-scroll::-webkit-scrollbar,
+.np-panel-list-scroll::-webkit-scrollbar {
+  width: 8px;
+}
+
+.np-episode-list-scroll::-webkit-scrollbar-thumb,
+.np-panel-list-scroll::-webkit-scrollbar-thumb {
+  background: #999;
+  border-radius: 0;
+}
+
+.np-episode-list-scroll::-webkit-scrollbar-track,
+.np-panel-list-scroll::-webkit-scrollbar-track {
+  background: #ecece8;
+}
+
+/* 分集列表项 */
+.np-episode-item {
+  display: flex;
+  align-items: stretch;
+  cursor: pointer;
+  border: 1px solid transparent;
+  background: transparent;
+  width: 100%;
+  padding: 0;
+  text-align: left;
+  font: inherit;
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.np-episode-item:hover {
+  background: var(--np-panel);
+}
+
+.np-episode-item.is-active {
+  border-color: var(--np-ink);
+  background: var(--np-panel);
+}
+
+.np-episode-item.is-locked {
+  cursor: default;
+}
+
+.np-episode-item:disabled {
+  opacity: 1;
+  color: inherit;
+}
+
+.np-episode-item.is-locked:hover {
+  background: transparent;
+}
+
+.np-episode-item.is-locked.is-active:hover {
+  background: var(--np-panel);
+}
+
+.np-episode-item-indicator {
+  width: 3px;
+  flex-shrink: 0;
+  background: transparent;
+  transition: background 0.15s;
+}
+
+.np-episode-item.is-active .np-episode-item-indicator {
+  background: var(--np-ink);
+}
+
+.np-episode-item-body {
+  flex: 1;
+  min-width: 0;
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.np-episode-item-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--np-ink);
+  line-height: 1.4;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.np-episode-item-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--np-text-soft);
+  line-height: 1.4;
 }
 
 .np-scene-column-scroll {
@@ -392,15 +1097,6 @@ a {
   line-height: 1.8;
 }
 
-.np-script-tip {
-  margin-top: 12px;
-  padding: 10px 12px;
-  border: 1px solid var(--np-ink);
-  background: var(--np-panel);
-  font-size: 13px;
-  color: var(--np-text-soft);
-}
-
 .np-status-tag {
   border-radius: 0 !important;
   border: 1px solid var(--np-ink);
@@ -435,6 +1131,177 @@ a {
 .np-scene-card,
 .np-panel-card {
   margin-bottom: 12px;
+}
+
+.np-asset-action-card .ant-card-body {
+  padding-top: 10px !important;
+  padding-bottom: 10px !important;
+}
+
+/* 资产系统 — 筛选工具栏 */
+.np-asset-filter-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--np-muted);
+  margin-bottom: 12px;
+}
+
+.np-asset-filter-bar .ant-select {
+  min-width: 160px;
+}
+
+/* 资产系统 — 摘要信息行 */
+.np-asset-summary-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+/* 资产系统 — 绑定状态 Tag 组 */
+.np-asset-binding-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+
+.np-asset-binding-tags .np-status-tag.is-unbound {
+  border-color: var(--np-muted);
+  color: var(--np-text-soft);
+}
+
+/* 资产绑定 — 流水线状态机 */
+.np-asset-pipeline {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.np-asset-pipeline-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.np-asset-pipeline-phase.is-idle {
+  border-color: var(--np-muted);
+  color: var(--np-text-soft);
+}
+
+.np-asset-pipeline-phase.is-drafting,
+.np-asset-pipeline-phase.is-executing {
+  border-color: var(--np-warning);
+  color: var(--np-warning);
+}
+
+.np-asset-pipeline-phase.is-draft_ready,
+.np-asset-pipeline-phase.is-succeeded {
+  border-color: var(--np-success);
+  color: var(--np-success);
+}
+
+.np-asset-pipeline-phase.is-failed {
+  border-color: var(--np-error);
+  color: var(--np-error);
+}
+
+.np-asset-pipeline-scroll {
+  overflow-x: auto;
+  padding-bottom: 2px;
+}
+
+.np-asset-pipeline-track {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  gap: 10px;
+  min-width: max-content;
+}
+
+.np-asset-pipeline-node {
+  position: relative;
+  min-width: 190px;
+  max-width: 190px;
+  padding: 8px 10px;
+  border: 1px solid var(--np-muted);
+  background: var(--np-bg);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.np-asset-pipeline-node::after {
+  content: '';
+  position: absolute;
+  right: -10px;
+  top: 16px;
+  width: 10px;
+  height: 1px;
+  background: var(--np-muted);
+}
+
+.np-asset-pipeline-node:last-child::after {
+  display: none;
+}
+
+.np-asset-pipeline-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--np-muted);
+}
+
+.np-asset-pipeline-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--np-ink);
+  line-height: 1.2;
+}
+
+.np-asset-pipeline-desc {
+  font-size: 11px;
+  color: var(--np-text-soft);
+  line-height: 1.3;
+}
+
+.np-asset-pipeline-node.is-active {
+  border-color: var(--np-warning);
+}
+
+.np-asset-pipeline-node.is-active .np-asset-pipeline-dot {
+  background: var(--np-warning);
+}
+
+.np-asset-pipeline-node.is-done {
+  border-color: var(--np-success);
+}
+
+.np-asset-pipeline-node.is-done .np-asset-pipeline-dot {
+  background: var(--np-success);
+}
+
+.np-asset-pipeline-node.is-error {
+  border-color: var(--np-error);
+}
+
+.np-asset-pipeline-node.is-error .np-asset-pipeline-dot {
+  background: var(--np-error);
+}
+
+.np-asset-pipeline-node.is-skip {
+  border-color: var(--np-muted);
+  opacity: 0.72;
+}
+
+.np-scene-episode-card,
+.np-scene-panel-card {
+  margin-bottom: 0;
 }
 
 /* 覆盖 Ant Design Card 头部溢出截断，允许标题区域自然换行 */
@@ -950,7 +1817,7 @@ a {
 .np-trim-editor__timeline {
   position: relative;
   height: 56px;
-  min-width: 100%;
+  min-width: 0;
   user-select: none;
   touch-action: none;
 }

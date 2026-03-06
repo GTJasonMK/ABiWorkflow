@@ -16,7 +16,8 @@ from app.api.websocket import router as ws_router
 from app.config import resolve_runtime_path, settings
 from app.database import Base, engine
 from app.models import *  # noqa: F401,F403 — 确保所有模型注册到 Base.metadata
-from app.services.runtime_settings import auto_import_ggk_if_needed
+from app.services.queue_runtime import ensure_queue_backend_ready, get_queue_runtime_state
+from app.services.schema_cleanup import cleanup_deprecated_single_track_schema
 
 # ── 日志配置 ──────────────────────────────────────────────
 _LOG_FORMAT = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
@@ -42,6 +43,13 @@ _COLUMN_MIGRATIONS: list[tuple[str, str, str]] = [
     ("characters", "portrait_url", "VARCHAR(500)"),
     ("video_clips", "candidate_index", "INTEGER DEFAULT 0"),
     ("video_clips", "is_selected", "BOOLEAN DEFAULT 1"),
+    ("global_characters", "folder_id", "VARCHAR(36)"),
+    ("global_characters", "project_id", "VARCHAR(36)"),
+    ("global_locations", "folder_id", "VARCHAR(36)"),
+    ("global_locations", "project_id", "VARCHAR(36)"),
+    ("global_voices", "folder_id", "VARCHAR(36)"),
+    ("global_voices", "project_id", "VARCHAR(36)"),
+    ("composition_tasks", "episode_id", "VARCHAR(36)"),
 ]
 
 
@@ -57,6 +65,33 @@ def _apply_column_migrations(connection) -> None:
                 f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_type}"
             ))
             logger.info("自动迁移：表 %s 新增列 %s", table_name, column_name)
+
+
+async def _migrate_legacy_scenes_to_panels() -> None:
+    """一次性迁移：将历史 Scene-only 项目转换为 Panel 单轨数据。"""
+    from app.database import async_session_factory
+    from app.services.storyboard_bridge import migrate_legacy_scenes_to_panels
+
+    marker_file = resolve_runtime_path("./outputs/.migrated_panels_single_track")
+    if marker_file.exists():
+        return
+
+    migrated_projects = 0
+    migrated_panels = 0
+    async with async_session_factory() as db:
+        migrated_projects, migrated_panels = await migrate_legacy_scenes_to_panels(db)
+        await db.commit()
+
+    marker_file.parent.mkdir(parents=True, exist_ok=True)
+    marker_file.write_text(
+        f"migrated_projects={migrated_projects},migrated_panels={migrated_panels}",
+        encoding="utf-8",
+    )
+    logger.info(
+        "分镜单轨迁移完成：迁移项目 %d 个，创建分镜 %d 条",
+        migrated_projects,
+        migrated_panels,
+    )
 
 
 async def _migrate_assets_to_project_dirs() -> None:
@@ -169,6 +204,63 @@ async def _migrate_assets_to_project_dirs() -> None:
     )
 
 
+async def _migrate_composition_episode_scope() -> None:
+    """一次性迁移：通过任务记录回填 composition_tasks.episode_id。"""
+    from sqlalchemy import select
+
+    from app.database import async_session_factory
+    from app.models import CompositionTask, TaskRecord
+    from app.services.json_codec import from_json_text
+
+    marker_file = resolve_runtime_path("./outputs/.migrated_composition_episode_scope")
+    if marker_file.exists():
+        return
+
+    backfilled_count = 0
+    async with async_session_factory() as db:
+        rows = (await db.execute(
+            select(TaskRecord).where(
+                TaskRecord.task_type == "compose",
+                TaskRecord.episode_id.isnot(None),
+                TaskRecord.result_json.isnot(None),
+            ).order_by(TaskRecord.updated_at.desc(), TaskRecord.created_at.desc())
+        )).scalars().all()
+
+        composition_episode_map: dict[str, str] = {}
+        for task in rows:
+            if not task.episode_id:
+                continue
+            result = from_json_text(task.result_json, {})
+            if not isinstance(result, dict):
+                continue
+            raw_composition_id = result.get("composition_id")
+            if not isinstance(raw_composition_id, str):
+                continue
+            composition_id = raw_composition_id.strip()
+            if not composition_id or composition_id in composition_episode_map:
+                continue
+            composition_episode_map[composition_id] = task.episode_id
+
+        if composition_episode_map:
+            targets = (await db.execute(
+                select(CompositionTask).where(
+                    CompositionTask.id.in_(tuple(composition_episode_map.keys())),
+                    CompositionTask.episode_id.is_(None),
+                )
+            )).scalars().all()
+            for task in targets:
+                episode_id = composition_episode_map.get(task.id)
+                if not episode_id:
+                    continue
+                task.episode_id = episode_id
+                backfilled_count += 1
+        await db.commit()
+
+    marker_file.parent.mkdir(parents=True, exist_ok=True)
+    marker_file.write_text(f"backfilled={backfilled_count}", encoding="utf-8")
+    logger.info("成片分集作用域回填完成：回填记录 %d 条", backfilled_count)
+
+
 def _resolve_file_path(path_value: str | None) -> Path | None:
     """将数据库中的路径解析为绝对路径。"""
     if not path_value:
@@ -187,12 +279,31 @@ def _resolve_file_path(path_value: str | None) -> Path | None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """应用生命周期：启动时创建数据库表、补齐新增列、迁移资产目录"""
+    """应用生命周期：启动时创建数据库表、补齐新增列、执行一次性迁移任务"""
+    ensure_queue_backend_ready(force_refresh=True)
+    queue_state = get_queue_runtime_state()
+    logger.info(
+        "任务队列运行模式: mode=%s, redis_available=%s, fallback_active=%s",
+        queue_state.mode,
+        queue_state.redis_available,
+        queue_state.fallback_active,
+    )
+
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
         await conn.run_sync(_apply_column_migrations)
+        cleanup_result = await conn.run_sync(cleanup_deprecated_single_track_schema)
+        if cleanup_result.get("skipped_by_marker"):
+            logger.info("单轨清理：检测到 marker，跳过 schema 清理")
+        else:
+            logger.info(
+                "单轨清理：完成 schema 清理 dropped_table=%s dropped_column=%s",
+                cleanup_result.get("dropped_table"),
+                cleanup_result.get("dropped_column"),
+            )
+    await _migrate_composition_episode_scope()
+    await _migrate_legacy_scenes_to_panels()
     await _migrate_assets_to_project_dirs()
-    await auto_import_ggk_if_needed()
     yield
 
 

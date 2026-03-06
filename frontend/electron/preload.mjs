@@ -20,4 +20,7 @@ contextBridge.exposeInMainWorld('__ABI_DESKTOP__', {
   async pickDirectory(options = {}) {
     return ipcRenderer.invoke('abi:pick-directory', options)
   },
+  async saveUrlToFile(options = {}) {
+    return ipcRenderer.invoke('abi:save-url-to-file', options)
+  },
 })

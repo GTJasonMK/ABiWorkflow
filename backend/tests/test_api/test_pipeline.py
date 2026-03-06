@@ -147,7 +147,13 @@ async def test_pipeline_parse_generate_compose_should_succeed(
     monkeypatch.setattr("app.llm.factory.create_llm_adapter", lambda: fake_llm)
     monkeypatch.setattr("app.api.generation.get_provider", lambda: fake_provider)
 
-    async def fake_compose(self, project_id: str, options, db: AsyncSession) -> str:
+    async def fake_compose(
+        self,
+        project_id: str,
+        options,
+        db: AsyncSession,
+        episode_id: str | None = None,
+    ) -> str:
         task = CompositionTask(
             project_id=project_id,
             output_path=f"/tmp/{project_id}.mp4",
@@ -174,7 +180,7 @@ async def test_pipeline_parse_generate_compose_should_succeed(
 
     parse_resp = await client.post(f"/api/projects/{project_id}/parse")
     assert parse_resp.status_code == 200
-    assert parse_resp.json()["data"]["scene_count"] == 2
+    assert parse_resp.json()["data"]["panel_count"] == 2
     assert parse_resp.json()["data"]["character_count"] == 1
 
     characters_resp = await client.get(f"/api/characters/project/{project_id}")
@@ -193,7 +199,7 @@ async def test_pipeline_parse_generate_compose_should_succeed(
 
     generate_resp = await client.post(f"/api/projects/{project_id}/generate")
     assert generate_resp.status_code == 200
-    assert generate_resp.json()["data"]["total_scenes"] == 2
+    assert generate_resp.json()["data"]["total_panels"] == 2
     assert generate_resp.json()["data"]["completed"] == 2
     assert generate_resp.json()["data"]["failed"] == 0
 

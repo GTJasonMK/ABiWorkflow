@@ -16,6 +16,9 @@ import {
 import { ReloadOutlined } from '@ant-design/icons'
 import PageHeader from '../../components/PageHeader'
 import useOperationsData, { normalizeOperationsTab } from './useOperationsData'
+import GlobalAssetManager from './GlobalAssetManager'
+import { saveUrlWithPicker } from '../../utils/download'
+import { getApiErrorMessage } from '../../utils/error'
 
 const { Text } = Typography
 
@@ -25,8 +28,10 @@ export default function OperationsCenter() {
   const { message } = AntdApp.useApp()
   const {
     projectLoading,
-    projectId,
-    setProjectId,
+    costProjectId,
+    setCostProjectId,
+    assetsProjectId,
+    setAssetsProjectId,
     projectOptions,
     assetsTab,
     setAssetsTab,
@@ -45,24 +50,79 @@ export default function OperationsCenter() {
     notifyError: (text) => message.error(text),
   })
 
+  const costsProjectSelector = (
+    <Card size="small" className="np-panel-card">
+      <Space wrap>
+        <Text type="secondary">成本统计项目：</Text>
+        <Select
+          style={{ minWidth: 260 }}
+          value={costProjectId ?? undefined}
+          options={projectOptions}
+          placeholder="选择项目"
+          onChange={setCostProjectId}
+        />
+      </Space>
+    </Card>
+  )
+
+  const assetsProjectSelector = (
+    <Card size="small" className="np-panel-card">
+      <Space wrap>
+        <Text type="secondary">项目资产项目：</Text>
+        <Select
+          style={{ minWidth: 260 }}
+          value={assetsProjectId ?? undefined}
+          options={projectOptions}
+          placeholder="选择项目"
+          onChange={setAssetsProjectId}
+        />
+      </Space>
+    </Card>
+  )
+
+  const handleExportComposition = async (compositionId: string, downloadUrl: string) => {
+    try {
+      const result = await saveUrlWithPicker({
+        url: downloadUrl,
+        title: '导出成片',
+        defaultFileName: `composition-${compositionId.slice(0, 8)}.mp4`,
+      })
+      if (result.mode === 'desktop' && !result.canceled && result.filePath) {
+        message.success(`已导出到：${result.filePath}`)
+      }
+    } catch (error) {
+      message.error(getApiErrorMessage(error, '导出成片失败'))
+    }
+  }
+
   const costsContent = projectLoading && projectOptions.length === 0 ? (
     <div className="np-page-loading">
       <Spin size="large" />
     </div>
-  ) : !projectId ? (
-    <Card className="np-panel-card">
-      <Empty description="暂无项目，请先创建项目。" />
-    </Card>
+  ) : !costProjectId ? (
+    <>
+      {costsProjectSelector}
+      <Card className="np-panel-card">
+        <Empty description="暂无项目，请先创建项目。" />
+      </Card>
+    </>
   ) : costLoading ? (
-    <div className="np-page-loading">
-      <Spin size="large" />
-    </div>
+    <>
+      {costsProjectSelector}
+      <div className="np-page-loading">
+        <Spin size="large" />
+      </div>
+    </>
   ) : costError ? (
-    <Card className="np-panel-card">
-      <Text className="np-task-error">{costError}</Text>
-    </Card>
+    <>
+      {costsProjectSelector}
+      <Card className="np-panel-card">
+        <Text className="np-task-error">{costError}</Text>
+      </Card>
+    </>
   ) : costPayload ? (
     <>
+      {costsProjectSelector}
       <div className="np-kpi-grid">
         <article className="np-kpi-card">
           <p className="np-kpi-label">调用次数</p>
@@ -130,25 +190,42 @@ export default function OperationsCenter() {
       </Card>
     </>
   ) : (
-    <Card className="np-panel-card">
-      <Empty description="暂无统计数据" />
-    </Card>
+    <>
+      {costsProjectSelector}
+      <Card className="np-panel-card">
+        <Empty description="暂无统计数据" />
+      </Card>
+    </>
   )
 
-  const projectAssetsContent = assetsLoading ? (
-    <div className="np-page-loading">
-      <Spin size="large" />
-    </div>
+  const projectAssetsContent = !assetsProjectId ? (
+    <>
+      {assetsProjectSelector}
+      <Card className="np-panel-card">
+        <Empty description="暂无项目，请先创建项目。" />
+      </Card>
+    </>
+  ) : assetsLoading ? (
+    <>
+      {assetsProjectSelector}
+      <div className="np-page-loading">
+        <Spin size="large" />
+      </div>
+    </>
   ) : assetsError ? (
-    <Card className="np-panel-card">
-      <Text className="np-task-error">{assetsError}</Text>
-    </Card>
+    <>
+      {assetsProjectSelector}
+      <Card className="np-panel-card">
+        <Text className="np-task-error">{assetsError}</Text>
+      </Card>
+    </>
   ) : assetsPayload ? (
     <>
+      {assetsProjectSelector}
       <div className="np-kpi-grid">
         <article className="np-kpi-card">
-          <p className="np-kpi-label">场景数</p>
-          <p className="np-kpi-value">{assetsPayload.summary.scene_count}</p>
+          <p className="np-kpi-label">分镜数</p>
+          <p className="np-kpi-value">{assetsPayload.summary.panel_count}</p>
         </article>
         <article className="np-kpi-card">
           <p className="np-kpi-label">片段总数</p>
@@ -185,7 +262,15 @@ export default function OperationsCenter() {
                     {item.include_tts && <Tag className="np-status-tag">配音</Tag>}
                   </Space>
                   <div style={{ marginTop: 8 }}>
-                    <a href={item.download_url} target="_blank" rel="noreferrer">下载成片</a>
+                    <Button
+                      type="link"
+                      style={{ padding: 0 }}
+                      onClick={() => {
+                        void handleExportComposition(item.id, item.download_url)
+                      }}
+                    >
+                      下载成片
+                    </Button>
                   </div>
                 </Card>
               )
@@ -194,22 +279,22 @@ export default function OperationsCenter() {
         )}
       </Card>
 
-      <Card title="场景片段" className="np-panel-card">
+      <Card title="分镜片段" className="np-panel-card">
         <Collapse
-          items={assetsPayload.scenes.map((scene) => ({
-            key: scene.scene_id,
+          items={assetsPayload.panels.map((panel) => ({
+            key: panel.panel_id,
             label: (
               <Space>
-                <Text>场景 {scene.sequence_order + 1} · {scene.title}</Text>
-                <Tag className={`np-status-tag np-status-${scene.status}`}>{scene.status}</Tag>
-                <Text type="secondary">片段 {scene.clips.length}</Text>
+                <Text>分镜 {panel.panel_order + 1} · {panel.title}</Text>
+                <Tag className={`np-status-tag np-status-${panel.status}`}>{panel.status}</Tag>
+                <Text type="secondary">片段 {panel.clips.length}</Text>
               </Space>
             ),
-            children: scene.clips.length === 0 ? (
-              <Empty description="该场景暂无生成片段" />
+            children: panel.clips.length === 0 ? (
+              <Empty description="该分镜暂无生成片段" />
             ) : (
               <div className="np-asset-grid">
-                {scene.clips.map((clip) => (
+                {panel.clips.map((clip) => (
                   <Card
                     key={clip.id}
                     size="small"
@@ -238,9 +323,12 @@ export default function OperationsCenter() {
       </Card>
     </>
   ) : (
-    <Card className="np-panel-card">
-      <Empty description="暂无资产数据" />
-    </Card>
+    <>
+      {assetsProjectSelector}
+      <Card className="np-panel-card">
+        <Empty description="暂无资产数据" />
+      </Card>
+    </>
   )
 
   const globalAssetsContent = globalAssetsLoading ? (
@@ -330,6 +418,12 @@ export default function OperationsCenter() {
           ]}
         />
       </Card>
+
+      <GlobalAssetManager
+        overview={globalAssetsPayload}
+        projectOptions={projectOptions}
+        defaultProjectId={assetsProjectId}
+      />
     </>
   ) : (
     <Card className="np-panel-card">
@@ -345,13 +439,6 @@ export default function OperationsCenter() {
         subtitle="统一查看成本统计、项目资产与全局资产，减少分散入口。"
         actions={(
           <Space>
-            <Select
-              style={{ minWidth: 260 }}
-              value={projectId ?? undefined}
-              options={projectOptions}
-              placeholder="选择项目"
-              onChange={setProjectId}
-            />
             <Button
               icon={<ReloadOutlined />}
               loading={costLoading || assetsLoading || globalAssetsLoading}

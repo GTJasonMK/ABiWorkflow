@@ -56,19 +56,12 @@ class Settings(BaseSettings):
     # 数据库
     database_url: str = "sqlite+aiosqlite:///./abi_workflow.db"
 
-    # LLM 配置
-    llm_provider: str = "openai"  # openai | anthropic | deepseek | ggk
-    openai_api_key: str = ""
-    openai_model: str = "gpt-4o"
-    openai_base_url: str | None = None
-    anthropic_api_key: str = ""
-    anthropic_model: str = "claude-sonnet-4-20250514"
-    deepseek_api_key: str = ""
-    deepseek_base_url: str = "https://api.deepseek.com/v1"
-    deepseek_model: str = "deepseek-chat"
+    # LLM 配置（根据模型名自动检测 API 格式：含 claude 使用 Anthropic，其余使用 OpenAI 兼容）
+    llm_api_key: str = ""
+    llm_model: str = "gpt-4o"
+    llm_base_url: str | None = None
     ggk_base_url: str = ""
     ggk_api_key: str = ""
-    ggk_text_model: str = "grok-3"
 
     # Redis / Celery
     redis_url: str = "redis://localhost:6379/0"
@@ -82,6 +75,7 @@ class Settings(BaseSettings):
     video_provider_max_duration_seconds: float = 6.0
     video_poll_interval_seconds: float = 1.0
     video_task_timeout_seconds: float = 300.0
+    project_asset_publish_global_default: bool = False
 
     # 通用 HTTP 视频提供者（用于接入真实文生视频服务）
     video_http_base_url: str = ""
@@ -106,12 +100,18 @@ class Settings(BaseSettings):
     # TTS
     tts_voice: str = "zh-CN-XiaoxiaoNeural"
 
-    # 角色立绘生成（OpenAI 兼容 API，复用 ggk_base_url + ggk_api_key）
+    # 角色立绘生成（OpenAI 兼容 /v1/images/generations API）
+    portrait_api_base_url: str = ""
+    portrait_api_key: str = ""
     portrait_image_model: str = "grok-imagine-1.0"
     portrait_output_dir: str = "./outputs/portraits"
     portrait_request_timeout_seconds: float = 120.0
 
-    model_config = {"env_file": "../.env", "env_file_encoding": "utf-8"}
+    # 模型选择与能力配置（JSON 字符串）
+    default_model_bindings: str = "{}"
+    model_capability_profiles: str = "{}"
+
+    model_config = {"env_file": "../.env", "env_file_encoding": "utf-8", "extra": "ignore"}
 
     @model_validator(mode="before")
     @classmethod

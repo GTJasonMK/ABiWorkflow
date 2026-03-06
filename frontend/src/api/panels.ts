@@ -2,6 +2,23 @@ import client from './client'
 import type { ApiResponse } from '../types/api'
 import type { Panel } from '../types/panel'
 
+export interface UpdatePanelPayload {
+  title?: string
+  script_text?: string | null
+  visual_prompt?: string | null
+  negative_prompt?: string | null
+  camera_hint?: string | null
+  duration_seconds?: number
+  style_preset?: string | null
+  reference_image_url?: string | null
+  voice_id?: string | null
+  tts_text?: string | null
+  tts_audio_url?: string | null
+  video_url?: string | null
+  lipsync_video_url?: string | null
+  status?: string | null
+}
+
 export interface ProviderTaskSubmitPayload {
   provider_key: string
   payload?: Record<string, unknown>
@@ -14,10 +31,6 @@ export async function listEpisodePanels(episodeId: string): Promise<Panel[]> {
   return resp.data.data ?? []
 }
 
-export async function listProjectPanels(projectId: string): Promise<Panel[]> {
-  const resp = await client.get<ApiResponse<Panel[]>>(`/projects/${projectId}/panels`)
-  return resp.data.data ?? []
-}
 
 export async function createPanel(
   episodeId: string,
@@ -29,7 +42,7 @@ export async function createPanel(
 
 export async function updatePanel(
   panelId: string,
-  payload: Partial<Panel>,
+  payload: UpdatePanelPayload,
 ): Promise<Panel> {
   const resp = await client.put<ApiResponse<Panel>>(`/panels/${panelId}`, payload)
   return resp.data.data!
@@ -78,14 +91,6 @@ export async function generatePanelVoiceLines(panelId: string, payload: Provider
   return resp.data.data ?? {}
 }
 
-export async function bindPanelVoice(
-  panelId: string,
-  payload: { voice_id?: string | null; binding?: Record<string, unknown> },
-): Promise<Panel> {
-  const resp = await client.put<ApiResponse<Panel>>(`/panels/${panelId}/voice/binding`, payload)
-  return resp.data.data!
-}
-
 export async function submitPanelLipsync(panelId: string, payload: ProviderTaskSubmitPayload): Promise<Record<string, unknown>> {
   const resp = await client.post<ApiResponse<Record<string, unknown>>>(`/panels/${panelId}/lipsync/submit`, payload)
   return resp.data.data ?? {}
@@ -100,5 +105,26 @@ export async function getPanelLipsyncStatus(panelId: string, providerKey: string
 
 export async function applyPanelLipsync(panelId: string, resultUrl: string): Promise<Panel> {
   const resp = await client.post<ApiResponse<Panel>>(`/panels/${panelId}/lipsync/apply`, { result_url: resultUrl })
+  return resp.data.data!
+}
+
+export async function retryPanel(panelId: string): Promise<{ panel_id: string; status: string; clips: number }> {
+  const resp = await client.post<ApiResponse<{ panel_id: string; status: string; clips: number }>>(
+    `/panels/${panelId}/retry`,
+    {},
+    { timeout: 0 },
+  )
+  return resp.data.data!
+}
+
+export async function generatePanelCandidates(
+  panelId: string,
+  candidateCount: number = 3,
+): Promise<{ panel_id: string; status: string; generated: number; failed: number }> {
+  const resp = await client.post<ApiResponse<{ panel_id: string; status: string; generated: number; failed: number }>>(
+    `/panels/${panelId}/generate-candidates?candidate_count=${candidateCount}`,
+    {},
+    { timeout: 0 },
+  )
   return resp.data.data!
 }

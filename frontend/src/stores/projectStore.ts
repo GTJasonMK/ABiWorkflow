@@ -46,7 +46,9 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     // 合并传入参数与已保存的搜索/筛选/排序条件
     const prev = get().listParams
     const merged: ListProjectsParams = { ...prev, ...params }
-    const { page, pageSize, ...rest } = merged
+    const rest = Object.fromEntries(
+      Object.entries(merged).filter(([key]) => key !== 'page' && key !== 'pageSize'),
+    ) as Omit<ListProjectsParams, 'page' | 'pageSize'>
     set({ loading: true, listParams: rest })
     try {
       const data = await projectApi.listProjects(merged)

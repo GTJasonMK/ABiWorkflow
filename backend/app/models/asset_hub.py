@@ -24,6 +24,10 @@ class GlobalAssetFolder(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
 
+    characters: Mapped[list["GlobalCharacter"]] = relationship("GlobalCharacter", back_populates="folder")
+    locations: Mapped[list["GlobalLocation"]] = relationship("GlobalLocation", back_populates="folder")
+    voices: Mapped[list["GlobalVoice"]] = relationship("GlobalVoice", back_populates="folder")
+
 
 class GlobalCharacter(Base):
     """全局角色素材。"""
@@ -32,10 +36,14 @@ class GlobalCharacter(Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     name: Mapped[str] = mapped_column(String(120), nullable=False)
+    project_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     alias: Mapped[str | None] = mapped_column(String(120), nullable=True)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     prompt_template: Mapped[str | None] = mapped_column(Text, nullable=True)
     reference_image_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    folder_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("global_asset_folders.id", ondelete="SET NULL"), nullable=True
+    )
     default_voice_id: Mapped[str | None] = mapped_column(
         String(36), ForeignKey("global_voices.id", ondelete="SET NULL"), nullable=True
     )
@@ -43,6 +51,8 @@ class GlobalCharacter(Base):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+    folder: Mapped["GlobalAssetFolder"] = relationship("GlobalAssetFolder", back_populates="characters")
 
 
 class GlobalLocation(Base):
@@ -52,13 +62,19 @@ class GlobalLocation(Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     name: Mapped[str] = mapped_column(String(120), nullable=False)
+    project_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     prompt_template: Mapped[str | None] = mapped_column(Text, nullable=True)
     reference_image_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    folder_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("global_asset_folders.id", ondelete="SET NULL"), nullable=True
+    )
     tags_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+    folder: Mapped["GlobalAssetFolder"] = relationship("GlobalAssetFolder", back_populates="locations")
 
 
 class GlobalVoice(Base):
@@ -68,8 +84,12 @@ class GlobalVoice(Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     name: Mapped[str] = mapped_column(String(120), nullable=False)
+    project_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     provider: Mapped[str] = mapped_column(String(50), default="edge-tts", nullable=False)
     voice_code: Mapped[str] = mapped_column(String(200), nullable=False)
+    folder_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("global_asset_folders.id", ondelete="SET NULL"), nullable=True
+    )
     language: Mapped[str | None] = mapped_column(String(30), nullable=True)
     gender: Mapped[str | None] = mapped_column(String(30), nullable=True)
     sample_audio_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
@@ -79,4 +99,5 @@ class GlobalVoice(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
 
+    folder: Mapped["GlobalAssetFolder"] = relationship("GlobalAssetFolder", back_populates="voices")
     panels: Mapped[list["Panel"]] = relationship("Panel", back_populates="voice")

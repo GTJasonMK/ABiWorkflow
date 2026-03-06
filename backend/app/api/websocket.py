@@ -8,6 +8,7 @@ import redis.asyncio as aioredis
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from app.config import settings
+from app.services.queue_runtime import redis_progress_enabled
 
 logger = logging.getLogger(__name__)
 
@@ -45,21 +46,41 @@ async def websocket_progress(websocket: WebSocket, project_id: str):
     """WebSocket 进度推送端点：订阅 Redis 频道，转发消息到客户端"""
     await manager.connect(project_id, websocket)
 
-    redis_client = aioredis.from_url(settings.redis_url)
-    pubsub = redis_client.pubsub()
+    redis_client = None
+    pubsub = None
+    redis_ready = False
+    channel = f"progress:{project_id}"
 
     try:
-        await pubsub.subscribe(f"progress:{project_id}")
+        if redis_progress_enabled():
+            redis_client = aioredis.from_url(settings.redis_url)
+            try:
+                await redis_client.ping()
+                pubsub = redis_client.pubsub()
+                await pubsub.subscribe(channel)
+                redis_ready = True
+            except Exception as e:  # noqa: BLE001
+                logger.warning("Redis 不可用，WebSocket 进度降级: %s", e)
+                await websocket.send_json({
+                    "type": "progress_unavailable",
+                    "data": {"message": "实时进度暂不可用（Redis 未连接）"},
+                })
+        else:
+            await websocket.send_json({
+                "type": "progress_unavailable",
+                "data": {"message": "实时进度暂不可用（当前为 SQLite 降级模式）"},
+            })
 
         while True:
-            message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
-            if message and message["type"] == "message":
-                data = json.loads(message["data"])
-                await websocket.send_json(data)
+            if redis_ready and pubsub is not None:
+                message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
+                if message and message.get("type") == "message":
+                    data = json.loads(message["data"])
+                    await websocket.send_json(data)
 
             # 检查 WebSocket 是否有消息（心跳等）
             try:
-                await asyncio.wait_for(websocket.receive_text(), timeout=0.01)
+                await asyncio.wait_for(websocket.receive_text(), timeout=0.2 if redis_ready else 1.0)
             except asyncio.TimeoutError:
                 pass
 
@@ -69,6 +90,17 @@ async def websocket_progress(websocket: WebSocket, project_id: str):
         logger.error("WebSocket 错误: %s", e)
     finally:
         manager.disconnect(project_id, websocket)
-        await pubsub.unsubscribe(f"progress:{project_id}")
-        await pubsub.close()
-        await redis_client.close()
+        if pubsub is not None:
+            try:
+                await pubsub.unsubscribe(channel)
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                await pubsub.close()
+            except Exception:  # noqa: BLE001
+                pass
+        if redis_client is not None:
+            try:
+                await redis_client.close()
+            except Exception:  # noqa: BLE001
+                pass

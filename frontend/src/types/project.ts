@@ -8,7 +8,9 @@ export interface Project {
   description: string | null
   script_text: string | null
   status: ProjectStatus
-  scene_count: number
+  episode_count: number
+  panel_count: number
+  generated_panel_count: number
   character_count: number
   created_at: string
   updated_at: string
@@ -20,7 +22,9 @@ export interface ProjectListItem {
   name: string
   description: string | null
   status: ProjectStatus
-  scene_count: number
+  episode_count: number
+  panel_count: number
+  generated_panel_count: number
   character_count: number
   created_at: string
   updated_at: string

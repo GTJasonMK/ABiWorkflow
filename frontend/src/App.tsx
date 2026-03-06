@@ -1,18 +1,9 @@
-import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
-import { ConfigProvider, App as AntdApp } from 'antd'
+import { lazy, Suspense, type ReactNode } from 'react'
+import { createBrowserRouter, RouterProvider, Navigate } from 'react-router-dom'
+import { ConfigProvider, App as AntdApp, Spin } from 'antd'
 import type { ThemeConfig } from 'antd'
 import zhCN from 'antd/locale/zh_CN'
 import AppLayout from './components/Layout'
-import Dashboard from './pages/Dashboard'
-import ProjectList from './pages/ProjectList'
-import ScriptInput from './pages/ScriptInput'
-import SceneEditor from './pages/SceneEditor'
-import VideoGeneration from './pages/VideoGeneration'
-import CompositionPreview from './pages/CompositionPreview'
-import TaskHub from './pages/TaskHub'
-import Guide from './pages/Guide'
-import SystemSettings from './pages/SystemSettings'
-import OperationsCenter from './pages/OperationsCenter'
 import { getDefaultHomePath } from './preferences'
 
 const newsprintTheme: ThemeConfig = {
@@ -63,29 +54,62 @@ const newsprintTheme: ThemeConfig = {
   },
 }
 
-function App() {
-  const homePath = getDefaultHomePath()
+function HomeRedirect() {
+  return <Navigate to={getDefaultHomePath()} replace />
+}
 
+const Dashboard = lazy(() => import('./pages/Dashboard'))
+const ProjectList = lazy(() => import('./pages/ProjectList'))
+const ScriptInput = lazy(() => import('./pages/ScriptInput'))
+const AssetBinding = lazy(() => import('./pages/AssetBinding'))
+const SceneEditor = lazy(() => import('./pages/SceneEditor'))
+const VideoGeneration = lazy(() => import('./pages/VideoGeneration'))
+const CompositionPreview = lazy(() => import('./pages/CompositionPreview'))
+const TaskHub = lazy(() => import('./pages/TaskHub'))
+const OperationsCenter = lazy(() => import('./pages/OperationsCenter'))
+const SystemSettings = lazy(() => import('./pages/SystemSettings'))
+const Guide = lazy(() => import('./pages/Guide'))
+
+function pageSuspense(node: ReactNode) {
+  return (
+    <Suspense
+      fallback={(
+        <div className="np-page-loading">
+          <Spin size="large" />
+        </div>
+      )}
+    >
+      {node}
+    </Suspense>
+  )
+}
+
+const router = createBrowserRouter([
+  {
+    path: '/',
+    element: <AppLayout />,
+    children: [
+      { index: true, element: <HomeRedirect /> },
+      { path: 'dashboard', element: pageSuspense(<Dashboard />) },
+      { path: 'projects', element: pageSuspense(<ProjectList />) },
+      { path: 'projects/:id/script', element: pageSuspense(<ScriptInput />) },
+      { path: 'projects/:id/assets', element: pageSuspense(<AssetBinding />) },
+      { path: 'projects/:id/scenes', element: pageSuspense(<SceneEditor />) },
+      { path: 'projects/:id/generate', element: pageSuspense(<VideoGeneration />) },
+      { path: 'projects/:id/compose', element: pageSuspense(<CompositionPreview />) },
+      { path: 'tasks', element: pageSuspense(<TaskHub />) },
+      { path: 'operations', element: pageSuspense(<OperationsCenter />) },
+      { path: 'settings', element: pageSuspense(<SystemSettings />) },
+      { path: 'guide', element: pageSuspense(<Guide />) },
+    ],
+  },
+])
+
+function App() {
   return (
     <ConfigProvider locale={zhCN} theme={newsprintTheme}>
       <AntdApp>
-        <BrowserRouter>
-          <Routes>
-            <Route path="/" element={<AppLayout />}>
-              <Route index element={<Navigate to={homePath} replace />} />
-              <Route path="dashboard" element={<Dashboard />} />
-              <Route path="projects" element={<ProjectList />} />
-              <Route path="projects/:id/script" element={<ScriptInput />} />
-              <Route path="projects/:id/scenes" element={<SceneEditor />} />
-              <Route path="projects/:id/generate" element={<VideoGeneration />} />
-              <Route path="projects/:id/compose" element={<CompositionPreview />} />
-              <Route path="tasks" element={<TaskHub />} />
-              <Route path="operations" element={<OperationsCenter />} />
-              <Route path="settings" element={<SystemSettings />} />
-              <Route path="guide" element={<Guide />} />
-            </Route>
-          </Routes>
-        </BrowserRouter>
+        <RouterProvider router={router} />
       </AntdApp>
     </ConfigProvider>
   )

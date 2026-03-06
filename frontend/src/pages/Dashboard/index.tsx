@@ -15,7 +15,7 @@ const { Text, Paragraph } = Typography
 function getProjectEntry(project: ProjectListItem): { path: string; label: string } {
   switch (project.status) {
     case 'parsed':
-      return { path: `/projects/${project.id}/scenes`, label: '进入场景' }
+      return { path: `/projects/${project.id}/scenes`, label: '进入分镜' }
     case 'generating':
       return { path: `/projects/${project.id}/generate`, label: '查看生成' }
     case 'composing':
@@ -157,9 +157,13 @@ export default function Dashboard() {
           </Card>
         </div>
 
-        <Card title="最近项目" className="np-panel-card">
+        <Card
+          title="最近活跃"
+          className="np-panel-card"
+          extra={<Button size="small" type="link" onClick={() => navigate('/projects')}>全部项目 →</Button>}
+        >
           <List
-            dataSource={projects.slice(0, 8)}
+            dataSource={projects.slice(0, 4)}
             locale={{ emptyText: '暂无项目，先创建一个项目开始创作。' }}
             renderItem={(item) => {
               const entry = getProjectEntry(item)

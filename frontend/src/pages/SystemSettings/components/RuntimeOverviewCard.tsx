@@ -23,7 +23,7 @@ export default function RuntimeOverviewCard({ health, runtime }: RuntimeOverview
           <Switch checked={Boolean(runtime?.app.debug)} disabled />
         </Descriptions.Item>
         <Descriptions.Item label="当前 LLM">
-          <Text>{runtime?.llm.provider ?? '-'} / {runtime?.llm.active_model ?? '-'}</Text>
+          <Text>{runtime?.llm.model ?? '-'}</Text>
         </Descriptions.Item>
         <Descriptions.Item label="视频提供者">
           <Text>{runtime?.video.provider ?? '-'}</Text>
@@ -31,6 +31,14 @@ export default function RuntimeOverviewCard({ health, runtime }: RuntimeOverview
         <Descriptions.Item label="Celery Worker">
           <StatusTag ok={Boolean(runtime?.queue.celery_worker_online)} onLabel="在线" offLabel="离线" />
         </Descriptions.Item>
+        <Descriptions.Item label="队列模式">
+          <Text>{runtime?.queue.queue_mode === 'sqlite' ? 'SQLite 降级' : 'Redis'}</Text>
+        </Descriptions.Item>
+        {runtime?.queue.fallback_active && runtime.queue.fallback_reason && (
+          <Descriptions.Item label="降级原因">
+            <Text type="secondary">{runtime.queue.fallback_reason}</Text>
+          </Descriptions.Item>
+        )}
       </Descriptions>
     </Card>
   )

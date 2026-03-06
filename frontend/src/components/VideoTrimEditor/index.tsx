@@ -4,7 +4,6 @@ import { CaretRightOutlined, PauseOutlined, UndoOutlined, ScissorOutlined } from
 import { useFrameExtractor } from '../../hooks/useFrameExtractor'
 import { trimComposition } from '../../api/composition'
 import { getApiErrorMessage } from '../../utils/error'
-import type { Scene } from '../../types/scene'
 
 /** 分镜在时间线上的段落信息 */
 interface SceneSegment {
@@ -14,16 +13,26 @@ interface SceneSegment {
   startTime: number
 }
 
+export interface TimelineSegment {
+  id: string
+  title: string
+  duration_seconds: number
+}
+
 interface VideoTrimEditorProps {
   src: string | null
   compositionId: string | null
   duration: number
-  scenes?: Scene[]
+  segments?: TimelineSegment[]
   onTrimApplied?: (newCompositionId: string, newDuration: number, newMediaUrl: string | null) => void
 }
 
-/** 每秒最少占据的像素宽度，低于此值启用水平滚动 */
-const MIN_PX_PER_SEC = 15
+/** 时间线缩放：每秒对应像素宽度（用于让不同时长体现真实长度差异） */
+const TIMELINE_PX_PER_SEC = 18
+/** 短视频下限，避免时间线过短导致手柄难以操作 */
+const MIN_TIMELINE_WIDTH = 240
+/** 超长视频上限，避免极端宽度导致渲染性能抖动 */
+const MAX_TIMELINE_WIDTH = 12000
 
 function formatTime(seconds: number): string {
   const m = Math.floor(seconds / 60)
@@ -31,7 +40,7 @@ function formatTime(seconds: number): string {
   return `${String(m).padStart(2, '0')}:${s.toFixed(1).padStart(4, '0')}`
 }
 
-export default function VideoTrimEditor({ src, compositionId, duration, scenes, onTrimApplied }: VideoTrimEditorProps) {
+export default function VideoTrimEditor({ src, compositionId, duration, segments, onTrimApplied }: VideoTrimEditorProps) {
   const videoRef = useRef<HTMLVideoElement>(null)
   const wrapperRef = useRef<HTMLDivElement>(null)
   const timelineRef = useRef<HTMLDivElement>(null)
@@ -48,37 +57,35 @@ export default function VideoTrimEditor({ src, compositionId, duration, scenes, 
 
   const effectiveDuration = videoDuration || duration || 0
 
-  // 计算时间线内容宽度：短视频撑满容器，长视频按最低密度溢出滚动
+  // 计算时间线内容宽度：按时长线性映射像素宽度，超出容器时出现横向滚动条
   const timelineWidth = useMemo(() => {
-    if (wrapperWidth <= 0 || effectiveDuration <= 0) return wrapperWidth || 0
-    const naturalPxPerSec = wrapperWidth / effectiveDuration
-    if (naturalPxPerSec >= MIN_PX_PER_SEC) return wrapperWidth
-    return Math.ceil(effectiveDuration * MIN_PX_PER_SEC)
-  }, [wrapperWidth, effectiveDuration])
+    if (effectiveDuration <= 0) {
+      return MIN_TIMELINE_WIDTH
+    }
+    const naturalWidth = Math.ceil(effectiveDuration * TIMELINE_PX_PER_SEC)
+    return Math.min(MAX_TIMELINE_WIDTH, Math.max(MIN_TIMELINE_WIDTH, naturalWidth))
+  }, [effectiveDuration])
 
   const isScrollable = timelineWidth > wrapperWidth
 
   // 分镜段落计算
   const sceneSegments = useMemo<SceneSegment[]>(() => {
-    if (!scenes || scenes.length === 0 || effectiveDuration <= 0) return []
-    const segments: SceneSegment[] = []
+    if (!segments || segments.length === 0 || effectiveDuration <= 0) return []
+    const timelineSegments: SceneSegment[] = []
     let cursor = 0
-    for (const scene of scenes) {
-      const selectedClipDuration = scene.clips
-        .filter((c) => c.is_selected && c.status === 'completed')
-        .reduce((sum, c) => sum + c.duration_seconds, 0)
-      if (selectedClipDuration > 0) {
-        segments.push({
-          id: scene.id,
-          title: scene.title,
-          duration: selectedClipDuration,
-          startTime: cursor,
-        })
-        cursor += selectedClipDuration
-      }
+    for (const segment of segments) {
+      const durationSeconds = Math.max(0, Number(segment.duration_seconds ?? 0))
+      if (durationSeconds <= 0) continue
+      timelineSegments.push({
+        id: segment.id,
+        title: segment.title,
+        duration: durationSeconds,
+        startTime: cursor,
+      })
+      cursor += durationSeconds
     }
-    return segments
-  }, [scenes, effectiveDuration])
+    return timelineSegments
+  }, [segments, effectiveDuration])
 
   const resetTrim = useCallback(() => {
     setTrimStart(0)
@@ -307,7 +314,7 @@ export default function VideoTrimEditor({ src, compositionId, duration, scenes, 
         <div
           ref={timelineRef}
           className="np-trim-editor__timeline"
-          style={{ width: isScrollable ? timelineWidth : '100%' }}
+          style={{ width: `${timelineWidth}px` }}
           onClick={handleTimelineClick}
           onMouseDown={handleTimelineMouseDown}
         >

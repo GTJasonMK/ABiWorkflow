@@ -11,9 +11,10 @@ async def mark_completed_compositions_stale(
     db: AsyncSession,
     project_id: str,
     *,
+    episode_id: str | None = None,
     exclude_composition_id: str | None = None,
 ) -> None:
-    """将项目下已完成成片统一标记为 stale。"""
+    """将受影响范围内的已完成成片标记为 stale；分集变更同时失效项目级总成片。"""
     stmt = (
         update(CompositionTask)
         .where(
@@ -22,6 +23,11 @@ async def mark_completed_compositions_stale(
         )
         .values(status=COMPOSITION_STATUS_STALE)
     )
+    if episode_id:
+        stmt = stmt.where(
+            (CompositionTask.episode_id == episode_id)
+            | (CompositionTask.episode_id.is_(None))
+        )
     if exclude_composition_id:
         stmt = stmt.where(CompositionTask.id != exclude_composition_id)
     await db.execute(stmt)

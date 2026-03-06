@@ -28,7 +28,9 @@ class ProjectResponse(BaseModel):
     description: str | None
     script_text: str | None
     status: str
-    scene_count: int = 0
+    episode_count: int = 0
+    panel_count: int = 0
+    generated_panel_count: int = 0
     character_count: int = 0
     created_at: datetime
     updated_at: datetime
@@ -43,7 +45,9 @@ class ProjectListItem(BaseModel):
     name: str
     description: str | None
     status: str
-    scene_count: int = 0
+    episode_count: int = 0
+    panel_count: int = 0
+    generated_panel_count: int = 0
     character_count: int = 0
     created_at: datetime
     updated_at: datetime

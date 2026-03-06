@@ -2,58 +2,49 @@ from __future__ import annotations
 
 import logging
 
+from app.progress_payload import PROGRESS_KEY_MESSAGE
 from app.project_status import (
-    PROJECT_STATUS_COMPLETED,
     PROJECT_STATUS_COMPOSING,
-    PROJECT_STATUS_FAILED,
     PROJECT_STATUS_PARSED,
+    resolve_composition_failure_status,
+    resolve_post_composition_status,
 )
 from app.services.progress import publish_progress
 from app.tasks.celery_app import celery_app
-from app.tasks.task_record_sync import sync_task_record_status
-from app.tasks.status_recovery import restore_project_status_after_task_failure, run_async_in_new_loop
-from app.task_record_status import TASK_RECORD_STATUS_COMPLETED, TASK_RECORD_STATUS_FAILED, TASK_RECORD_STATUS_RUNNING
+from app.tasks.status_recovery import (
+    mark_worker_task_completed,
+    mark_worker_task_failed,
+    mark_worker_task_started,
+    restore_project_status_after_task_failure,
+    run_async_in_new_loop,
+)
 
 logger = logging.getLogger(__name__)
 
 
 @celery_app.task(bind=True, name="compose_video")
-def compose_video_task(self, project_id: str, options: dict | None = None, previous_status: str = PROJECT_STATUS_PARSED):
+def compose_video_task(
+    self,
+    project_id: str,
+    options: dict | None = None,
+    previous_status: str = PROJECT_STATUS_PARSED,
+    episode_id: str | None = None,
+):
     """异步视频合成任务"""
     from app.config import reload_settings
     reload_settings()
-    run_async_in_new_loop(sync_task_record_status(
-        source_task_id=self.request.id,
-        status=TASK_RECORD_STATUS_RUNNING,
-        progress_percent=2.0,
-        message="合成任务开始执行",
-        event_type="worker_started",
-    ))
+    mark_worker_task_started(self.request.id, "合成任务开始执行")
 
-    publish_progress(project_id, "compose_start", {"message": "开始合成视频"})
+    publish_progress(project_id, "compose_start", {PROGRESS_KEY_MESSAGE: "开始合成视频"})
 
     try:
-        result = run_async_in_new_loop(_run_compose(project_id, options, previous_status))
-        run_async_in_new_loop(sync_task_record_status(
-            source_task_id=self.request.id,
-            status=TASK_RECORD_STATUS_COMPLETED,
-            progress_percent=100.0,
-            message="合成任务完成",
-            result=result,
-            event_type="worker_completed",
-        ))
+        result = run_async_in_new_loop(_run_compose(project_id, options, previous_status, episode_id))
+        mark_worker_task_completed(self.request.id, "合成任务完成", result)
 
         return result
 
     except Exception as e:
-        run_async_in_new_loop(sync_task_record_status(
-            source_task_id=self.request.id,
-            status=TASK_RECORD_STATUS_FAILED,
-            progress_percent=100.0,
-            message="合成任务失败",
-            error_message=str(e),
-            event_type="worker_failed",
-        ))
+        mark_worker_task_failed(self.request.id, "合成任务失败", str(e))
         restore_project_status_after_task_failure(
             project_id,
             PROJECT_STATUS_COMPOSING,
@@ -62,11 +53,16 @@ def compose_video_task(self, project_id: str, options: dict | None = None, previ
             logger=logger,
         )
         logger.exception("视频合成任务失败: project=%s", project_id)
-        publish_progress(project_id, "compose_failed", {"message": f"合成失败: {e}"})
+        publish_progress(project_id, "compose_failed", {PROGRESS_KEY_MESSAGE: f"合成失败: {e}"})
         raise
 
 
-async def _run_compose(project_id: str, options_dict: dict | None, previous_status: str) -> dict:
+async def _run_compose(
+    project_id: str,
+    options_dict: dict | None,
+    previous_status: str,
+    episode_id: str | None = None,
+) -> dict:
     """执行异步视频合成逻辑"""
     from sqlalchemy import select
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -93,19 +89,27 @@ async def _run_compose(project_id: str, options_dict: dict | None, previous_stat
 
             try:
                 editor = VideoEditorService()
-                composition_id = await editor.compose(project_id, composition_options, db)
-                await mark_completed_compositions_stale(db, project_id, exclude_composition_id=composition_id)
+                composition_id = await editor.compose(project_id, composition_options, db, episode_id=episode_id)
+                await mark_completed_compositions_stale(
+                    db,
+                    project_id,
+                    episode_id=episode_id,
+                    exclude_composition_id=composition_id,
+                )
 
-                project.status = PROJECT_STATUS_COMPLETED
+                project.status = resolve_post_composition_status(
+                    previous_status,
+                    scoped_to_episode=bool(episode_id),
+                )
                 await db.commit()
 
-                return {"composition_id": composition_id}
+                return {"composition_id": composition_id, "episode_id": episode_id}
             except ValueError:
                 project.status = previous_status
                 await db.commit()
                 raise
             except Exception:
-                project.status = PROJECT_STATUS_FAILED if previous_status != PROJECT_STATUS_COMPLETED else PROJECT_STATUS_COMPLETED
+                project.status = resolve_composition_failure_status(previous_status, scoped_to_episode=bool(episode_id))
                 await db.commit()
                 raise
     finally:

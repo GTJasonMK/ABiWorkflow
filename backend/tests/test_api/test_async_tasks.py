@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import asyncio
-from types import SimpleNamespace
+import os
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from httpx import AsyncClient
@@ -14,6 +15,7 @@ from app.models import Project, Scene
 from app.tasks.compose_tasks import compose_video_task
 from app.tasks.generate_tasks import generate_videos_task
 from app.tasks.parse_tasks import _run_parse, parse_script_task
+from tests.test_api._workflow_test_utils import seed_single_panel
 
 
 class _FakeTaskDispatcher:
@@ -30,6 +32,15 @@ def _force_worker_available(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("app.tasks.health.has_celery_worker", lambda: True)
     # task_mode.py 在模块顶层 import 了 has_celery_worker，需同时 patch 该引用
     monkeypatch.setattr("app.api.task_mode.has_celery_worker", lambda: True)
+
+
+def _force_worker_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("app.tasks.health.has_celery_worker", lambda: False)
+    monkeypatch.setattr("app.api.task_mode.has_celery_worker", lambda: False)
+
+
+def _test_database_url() -> str:
+    return "sqlite+aiosqlite:///" + Path(f"./test_{os.getpid()}.db").resolve().as_posix()
 
 
 @pytest.mark.asyncio
@@ -76,6 +87,15 @@ async def test_generate_async_should_queue_task(
         status="pending",
     )
     db_session.add(scene)
+    await db_session.flush()
+    await seed_single_panel(
+        db_session,
+        project.id,
+        title="场景一",
+        visual_prompt="A cinematic shot",
+        duration_seconds=5.0,
+        status="pending",
+    )
     await db_session.commit()
 
     fake_dispatcher = _FakeTaskDispatcher("gen-task-1")
@@ -109,6 +129,16 @@ async def test_generate_async_should_not_queue_when_no_scene_needs_regeneration(
         status="generated",
     )
     db_session.add(scene)
+    await db_session.flush()
+    await seed_single_panel(
+        db_session,
+        project.id,
+        title="场景一",
+        visual_prompt="A cinematic shot",
+        duration_seconds=5.0,
+        status="completed",
+        video_url="/media/videos/ready.mp4",
+    )
     await db_session.commit()
 
     fake_dispatcher = _FakeTaskDispatcher("gen-task-unused")
@@ -117,7 +147,7 @@ async def test_generate_async_should_not_queue_when_no_scene_needs_regeneration(
     response = await client.post(f"/api/projects/{project.id}/generate", params={"async_mode": "true"})
     assert response.status_code == 200
     payload = response.json()["data"]
-    assert payload["total_scenes"] == 1
+    assert payload["total_panels"] == 1
     assert payload["completed"] == 1
     assert payload["failed"] == 0
     assert "task_id" not in payload
@@ -147,6 +177,16 @@ async def test_compose_async_should_queue_task(
         status="generated",
     )
     db_session.add(scene)
+    await db_session.flush()
+    await seed_single_panel(
+        db_session,
+        project.id,
+        title="场景一",
+        visual_prompt="A cinematic shot",
+        duration_seconds=5.0,
+        status="completed",
+        video_url="/media/videos/ready.mp4",
+    )
     await db_session.commit()
 
     fake_dispatcher = _FakeTaskDispatcher("compose-task-1")
@@ -200,19 +240,22 @@ async def test_parse_async_should_fallback_to_sync_when_worker_unavailable(
     db_session: AsyncSession,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    monkeypatch.setattr("app.tasks.health.has_celery_worker", lambda: False)
+    _force_worker_unavailable(monkeypatch)
 
     class FakeLLM:
         async def close(self) -> None:
             return None
 
-    async def fake_parse_script(self, project_id: str, script_text: str, db: AsyncSession):  # noqa: ANN001
+    async def fake_parse_project_from_episodes(project_id: str, script_text: str, llm, db: AsyncSession):  # noqa: ANN001
         project = (await db.execute(select(Project).where(Project.id == project_id))).scalar_one()
         project.status = "parsed"
-        return SimpleNamespace(character_count=2, scene_count=3)
+        return SimpleNamespace(character_count=2, panel_count=3, episode_count=1)
 
     monkeypatch.setattr("app.llm.factory.create_llm_adapter", lambda: FakeLLM())
-    monkeypatch.setattr("app.services.script_parser.ScriptParserService.parse_script", fake_parse_script)
+    monkeypatch.setattr(
+        "app.api.projects_workflow.parse_project_from_episodes",
+        fake_parse_project_from_episodes,
+    )
 
     project = Project(name="异步解析降级测试", status="draft", script_text="测试剧本")
     db_session.add(project)
@@ -223,7 +266,7 @@ async def test_parse_async_should_fallback_to_sync_when_worker_unavailable(
     assert response.status_code == 200
     data = response.json()["data"]
     assert data["character_count"] == 2
-    assert data["scene_count"] == 3
+    assert data["panel_count"] == 3
     assert "task_id" not in data
 
 
@@ -233,9 +276,9 @@ async def test_generate_async_should_fallback_to_sync_when_worker_unavailable(
     db_session: AsyncSession,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    monkeypatch.setattr("app.tasks.health.has_celery_worker", lambda: False)
+    _force_worker_unavailable(monkeypatch)
 
-    async def fake_generate_all(self, project_id: str, db: AsyncSession):  # noqa: ANN001
+    async def fake_generate_all(self, project_id: str, db: AsyncSession, *, scene_ids=None):  # noqa: ANN001
         scenes = (await db.execute(select(Scene).where(Scene.project_id == project_id))).scalars().all()
         for scene in scenes:
             scene.status = "generated"
@@ -256,13 +299,22 @@ async def test_generate_async_should_fallback_to_sync_when_worker_unavailable(
         status="pending",
     )
     db_session.add(scene)
+    await db_session.flush()
+    await seed_single_panel(
+        db_session,
+        project.id,
+        title="场景一",
+        visual_prompt="A cinematic shot",
+        duration_seconds=5.0,
+        status="pending",
+    )
     await db_session.commit()
 
     response = await client.post(f"/api/projects/{project.id}/generate", params={"async_mode": "true"})
 
     assert response.status_code == 200
     data = response.json()["data"]
-    assert data["total_scenes"] == 1
+    assert data["total_panels"] == 1
     assert data["completed"] == 1
     assert data["failed"] == 0
     assert "task_id" not in data
@@ -274,7 +326,7 @@ async def test_compose_async_should_fallback_to_sync_when_worker_unavailable(
     db_session: AsyncSession,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    monkeypatch.setattr("app.tasks.health.has_celery_worker", lambda: False)
+    _force_worker_unavailable(monkeypatch)
 
     project = Project(name="异步降级测试", status="parsed")
     db_session.add(project)
@@ -289,9 +341,19 @@ async def test_compose_async_should_fallback_to_sync_when_worker_unavailable(
         status="generated",
     )
     db_session.add(scene)
+    await db_session.flush()
+    await seed_single_panel(
+        db_session,
+        project.id,
+        title="场景一",
+        visual_prompt="A cinematic shot",
+        duration_seconds=5.0,
+        status="completed",
+        video_url="/media/videos/ready.mp4",
+    )
     await db_session.commit()
 
-    async def fake_compose(self, project_id: str, options, db: AsyncSession):  # noqa: ANN001
+    async def fake_compose(self, project_id: str, options, db: AsyncSession, episode_id: str | None = None):  # noqa: ANN001
         return "comp-sync-1"
 
     monkeypatch.setattr("app.api.composition.VideoEditorService.compose", fake_compose)
@@ -317,7 +379,7 @@ async def test_run_parse_should_restore_status_when_llm_init_failed(
     db_session.add(project)
     await db_session.commit()
 
-    test_db_url = f"sqlite+aiosqlite:///{Path('test.db').resolve().as_posix()}"
+    test_db_url = _test_database_url()
     monkeypatch.setattr(settings, "database_url", test_db_url)
 
     def _raise_init_error():  # noqa: ANN202
@@ -341,10 +403,12 @@ async def test_parse_task_wrapper_should_restore_status_when_run_parse_failed_ea
     db_session.add(project)
     await db_session.commit()
 
-    test_db_url = f"sqlite+aiosqlite:///{Path('test.db').resolve().as_posix()}"
+    test_db_url = _test_database_url()
     monkeypatch.setattr(settings, "database_url", test_db_url)
     # 禁用 reload_settings 防止 Celery 任务入口覆盖 monkeypatch 的 database_url
     monkeypatch.setattr("app.config.reload_settings", lambda: None)
+
+    monkeypatch.setattr("app.tasks.status_recovery.sync_worker_task_status", lambda *args, **kwargs: None)
 
     async def fake_run_parse(project_id: str, previous_status: str, script_text: str | None = None):  # noqa: ANN001
         raise RuntimeError("parse wrapper failed early")
@@ -367,10 +431,12 @@ async def test_generate_task_wrapper_should_restore_status_when_run_generate_fai
     db_session.add(project)
     await db_session.commit()
 
-    test_db_url = f"sqlite+aiosqlite:///{Path('test.db').resolve().as_posix()}"
+    test_db_url = _test_database_url()
     monkeypatch.setattr(settings, "database_url", test_db_url)
     # 禁用 reload_settings 防止 Celery 任务入口覆盖 monkeypatch 的 database_url
     monkeypatch.setattr("app.config.reload_settings", lambda: None)
+
+    monkeypatch.setattr("app.tasks.status_recovery.sync_worker_task_status", lambda *args, **kwargs: None)
 
     async def fake_run_generate(project_id: str, previous_status: str, force_regenerate: bool = False):  # noqa: ANN001
         raise RuntimeError("generate wrapper failed early")
@@ -393,12 +459,19 @@ async def test_compose_task_wrapper_should_restore_status_when_run_compose_faile
     db_session.add(project)
     await db_session.commit()
 
-    test_db_url = f"sqlite+aiosqlite:///{Path('test.db').resolve().as_posix()}"
+    test_db_url = _test_database_url()
     monkeypatch.setattr(settings, "database_url", test_db_url)
     # 禁用 reload_settings 防止 Celery 任务入口覆盖 monkeypatch 的 database_url
     monkeypatch.setattr("app.config.reload_settings", lambda: None)
 
-    async def fake_run_compose(project_id: str, options: dict | None, previous_status: str):  # noqa: ANN001
+    monkeypatch.setattr("app.tasks.status_recovery.sync_worker_task_status", lambda *args, **kwargs: None)
+
+    async def fake_run_compose(
+        project_id: str,
+        options: dict | None,
+        previous_status: str,
+        episode_id: str | None = None,
+    ):  # noqa: ANN001
         raise RuntimeError("compose wrapper failed early")
 
     monkeypatch.setattr("app.tasks.compose_tasks._run_compose", fake_run_compose)

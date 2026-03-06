@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
@@ -8,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from app.database import Base, get_db
 from app.main import app
 
-TEST_DATABASE_URL = "sqlite+aiosqlite:///./test.db"
+TEST_DATABASE_URL = f"sqlite+aiosqlite:///./test_{os.getpid()}.db"
 
 test_engine = create_async_engine(TEST_DATABASE_URL, echo=False)
 test_session_factory = async_sessionmaker(test_engine, class_=AsyncSession, expire_on_commit=False)
@@ -25,6 +27,7 @@ def disable_ggk_auto_import(monkeypatch: pytest.MonkeyPatch):
 async def setup_database():
     """每个测试前重建数据库"""
     async with test_engine.begin() as conn:
+        await conn.run_sync(Base.metadata.drop_all)
         await conn.run_sync(Base.metadata.create_all)
     yield
     async with test_engine.begin() as conn:

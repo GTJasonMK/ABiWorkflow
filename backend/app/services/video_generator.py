@@ -14,6 +14,11 @@ from sqlalchemy.orm import selectinload
 from app.clip_status import CLIP_STATUS_COMPLETED, CLIP_STATUS_FAILED
 from app.config import resolve_runtime_path, settings
 from app.models import Scene, SceneCharacter, VideoClip
+from app.progress_payload import (
+    PROGRESS_KEY_MESSAGE,
+    PROGRESS_KEY_PANEL_ORDER,
+    PROGRESS_KEY_PERCENT,
+)
 from app.scene_status import (
     REGENERATABLE_SCENE_STATUSES,
     SCENE_STATUS_FAILED,
@@ -57,35 +62,66 @@ class VideoGeneratorService:
 
     @staticmethod
     def _pick_reference_image(scene: Scene) -> str | None:
-        """优先使用场景关联角色中的参考图，提升跨场景一致性。"""
+        """优先使用分镜映射场景关联角色中的参考图，提升跨分镜一致性。"""
         for scene_character in scene.characters:
             character = scene_character.character
             if character and character.reference_image_url:
                 return character.reference_image_url
+        # Panel->Scene 桥接场景会复用 setting 传递参考图 URL。
+        setting = (scene.setting or "").strip()
+        if setting.startswith("http://") or setting.startswith("https://"):
+            return setting
         return None
 
     @staticmethod
     def _seed_for(scene: Scene, clip_order: int, candidate_index: int = 0) -> int:
-        """为场景片段生成稳定随机种子，降低多次生成结果漂移。"""
+        """为分镜映射片段生成稳定随机种子，降低多次生成结果漂移。"""
         raw = f"{scene.project_id}:{scene.id}:{clip_order}:{candidate_index}"
         digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()
         return int(digest[:8], 16)
 
-    def split_by_duration(self, scene: Scene, reference_image_url: str | None = None) -> list[VideoGenerateRequest]:
-        """将超长场景拆分为多个子请求"""
+    @staticmethod
+    def _build_request(
+        scene: Scene,
+        duration: float,
+        clip_order: int,
+        reference_image_url: str | None,
+        *,
+        candidate_index: int = 0,
+    ) -> VideoGenerateRequest:
+        return VideoGenerateRequest(
+            prompt=scene.video_prompt or "",
+            duration_seconds=duration,
+            negative_prompt=scene.negative_prompt,
+            reference_image_url=reference_image_url,
+            seed=VideoGeneratorService._seed_for(scene, clip_order, candidate_index),
+        )
+
+    def _build_clip_requests(
+        self,
+        scene: Scene,
+        reference_image_url: str | None,
+        *,
+        candidate_index: int = 0,
+    ) -> list[tuple[int, VideoGenerateRequest]]:
         durations = self._split_durations(scene.duration_seconds, self._provider.max_duration_seconds)
-        requests: list[VideoGenerateRequest] = []
-        for clip_order, duration in enumerate(durations):
-            requests.append(
-                VideoGenerateRequest(
-                    prompt=scene.video_prompt or "",
-                    duration_seconds=duration,
-                    negative_prompt=scene.negative_prompt,
-                    reference_image_url=reference_image_url,
-                    seed=self._seed_for(scene, clip_order),
-                )
+        return [
+            (
+                clip_order,
+                self._build_request(
+                    scene,
+                    duration,
+                    clip_order,
+                    reference_image_url,
+                    candidate_index=candidate_index,
+                ),
             )
-        return requests
+            for clip_order, duration in enumerate(durations)
+        ]
+
+    def split_by_duration(self, scene: Scene, reference_image_url: str | None = None) -> list[VideoGenerateRequest]:
+        """将超长分镜映射拆分为多个子请求。"""
+        return [request for _, request in self._build_clip_requests(scene, reference_image_url)]
 
     async def _wait_for_completion(self, task_id: str):
         """轮询任务直到完成/失败/超时。"""
@@ -101,15 +137,140 @@ class VideoGeneratorService:
 
             await asyncio.sleep(self._poll_interval_seconds)
 
-    async def generate_scene(self, scene: Scene, db: AsyncSession) -> list[VideoClip]:
-        """为单个场景生成视频（重试时会先清理旧片段）。"""
-        # 重新加载场景与角色关联，确保参考图可用
+    async def _load_scene_with_relations(self, scene_id: str, db: AsyncSession) -> Scene:
         stmt = (
             select(Scene)
-            .where(Scene.id == scene.id)
+            .where(Scene.id == scene_id)
             .options(selectinload(Scene.characters).selectinload(SceneCharacter.character))
         )
-        scene_with_relations = (await db.execute(stmt)).scalar_one()
+        return (await db.execute(stmt)).scalar_one()
+
+    def _build_output_path(
+        self,
+        scene: Scene,
+        clip_order: int,
+        task_id: str,
+        *,
+        candidate_index: int | None = None,
+    ) -> Path:
+        project_dir = self._output_dir / scene.project_id
+        project_dir.mkdir(parents=True, exist_ok=True)
+        if candidate_index is None:
+            filename = f"{scene.id}_{clip_order}_{task_id}.mp4"
+        else:
+            filename = f"{scene.id}_{clip_order}_c{candidate_index}_{task_id}.mp4"
+        return project_dir / filename
+
+    @staticmethod
+    def _build_clip_record(
+        scene: Scene,
+        request: VideoGenerateRequest,
+        *,
+        clip_order: int,
+        candidate_index: int | None = None,
+        is_selected: bool = False,
+        status: str,
+        provider_task_id: str | None = None,
+        file_path: str | None = None,
+        error_message: str | None = None,
+    ) -> VideoClip:
+        return VideoClip(
+            scene_id=scene.id,
+            clip_order=clip_order,
+            candidate_index=candidate_index or 0,
+            is_selected=is_selected,
+            file_path=file_path,
+            duration_seconds=request.duration_seconds,
+            provider_task_id=provider_task_id,
+            status=status,
+            error_message=error_message,
+        )
+
+    async def _generate_clip(
+        self,
+        scene: Scene,
+        request: VideoGenerateRequest,
+        *,
+        clip_order: int,
+        candidate_index: int | None = None,
+        is_selected: bool = False,
+    ) -> VideoClip:
+        try:
+            task_id = await self._provider.generate(request)
+            status = await self._wait_for_completion(task_id)
+
+            if status.status.lower() == CLIP_STATUS_COMPLETED:
+                output_path = self._build_output_path(
+                    scene,
+                    clip_order,
+                    task_id,
+                    candidate_index=candidate_index,
+                )
+                local_file = await self._provider.download(task_id, output_path)
+                return self._build_clip_record(
+                    scene,
+                    request,
+                    clip_order=clip_order,
+                    candidate_index=candidate_index,
+                    is_selected=is_selected,
+                    provider_task_id=task_id,
+                    file_path=str(local_file),
+                    status=CLIP_STATUS_COMPLETED,
+                )
+
+            return self._build_clip_record(
+                scene,
+                request,
+                clip_order=clip_order,
+                candidate_index=candidate_index,
+                is_selected=is_selected,
+                provider_task_id=task_id,
+                status=CLIP_STATUS_FAILED,
+                error_message=status.error_message or f"任务状态: {status.status}",
+            )
+        except Exception as err:
+            logger.error(
+                "分镜映射 %s 候选 %s 片段 %d 生成失败: %s",
+                scene.id,
+                candidate_index if candidate_index is not None else "default",
+                clip_order,
+                err,
+            )
+            return self._build_clip_record(
+                scene,
+                request,
+                clip_order=clip_order,
+                candidate_index=candidate_index,
+                is_selected=is_selected,
+                status=CLIP_STATUS_FAILED,
+                error_message=str(err),
+            )
+
+    async def _generate_request_batch(
+        self,
+        scene: Scene,
+        db: AsyncSession,
+        clip_requests: list[tuple[int, VideoGenerateRequest]],
+        *,
+        candidate_index: int | None = None,
+        is_selected: bool = False,
+    ) -> list[VideoClip]:
+        clips: list[VideoClip] = []
+        for clip_order, request in clip_requests:
+            clip = await self._generate_clip(
+                scene,
+                request,
+                clip_order=clip_order,
+                candidate_index=candidate_index,
+                is_selected=is_selected,
+            )
+            db.add(clip)
+            clips.append(clip)
+        return clips
+
+    async def generate_scene(self, scene: Scene, db: AsyncSession) -> list[VideoClip]:
+        """为单个分镜映射生成视频（重试时会先清理旧片段）。"""
+        scene_with_relations = await self._load_scene_with_relations(scene.id, db)
 
         # 重试前清理旧片段，避免重复拼接
         await db.execute(delete(VideoClip).where(VideoClip.scene_id == scene_with_relations.id))
@@ -117,50 +278,12 @@ class VideoGeneratorService:
         await db.flush()
 
         reference_image_url = self._pick_reference_image(scene_with_relations)
-        requests = self.split_by_duration(scene_with_relations, reference_image_url=reference_image_url)
-        clips: list[VideoClip] = []
+        clips = await self._generate_request_batch(
+            scene_with_relations,
+            db,
+            self._build_clip_requests(scene_with_relations, reference_image_url),
+        )
 
-        for idx, req in enumerate(requests):
-            try:
-                task_id = await self._provider.generate(req)
-                status = await self._wait_for_completion(task_id)
-
-                if status.status.lower() == CLIP_STATUS_COMPLETED:
-                    project_dir = self._output_dir / scene_with_relations.project_id
-                    project_dir.mkdir(parents=True, exist_ok=True)
-                    output_path = project_dir / f"{scene_with_relations.id}_{idx}_{task_id}.mp4"
-                    local_file = await self._provider.download(task_id, output_path)
-                    clip = VideoClip(
-                        scene_id=scene_with_relations.id,
-                        clip_order=idx,
-                        file_path=str(local_file),
-                        duration_seconds=req.duration_seconds,
-                        provider_task_id=task_id,
-                        status=CLIP_STATUS_COMPLETED,
-                    )
-                else:
-                    clip = VideoClip(
-                        scene_id=scene_with_relations.id,
-                        clip_order=idx,
-                        duration_seconds=req.duration_seconds,
-                        provider_task_id=task_id,
-                        status=CLIP_STATUS_FAILED,
-                        error_message=status.error_message or f"任务状态: {status.status}",
-                    )
-            except Exception as e:
-                logger.error("场景 %s 片段 %d 生成失败: %s", scene_with_relations.id, idx, e)
-                clip = VideoClip(
-                    scene_id=scene_with_relations.id,
-                    clip_order=idx,
-                    duration_seconds=req.duration_seconds,
-                    status=CLIP_STATUS_FAILED,
-                    error_message=str(e),
-                )
-
-            db.add(clip)
-            clips.append(clip)
-
-        # 更新场景状态
         all_completed = all(c.status == CLIP_STATUS_COMPLETED for c in clips)
         scene_with_relations.status = SCENE_STATUS_GENERATED if all_completed else SCENE_STATUS_FAILED
         await db.flush()
@@ -173,16 +296,9 @@ class VideoGeneratorService:
         candidate_count: int,
         db: AsyncSession,
     ) -> list[VideoClip]:
-        """为场景生成多个候选视频（不清理旧片段，追加新候选）。"""
-        # 重新加载场景与角色关联
-        stmt = (
-            select(Scene)
-            .where(Scene.id == scene.id)
-            .options(selectinload(Scene.characters).selectinload(SceneCharacter.character))
-        )
-        scene_with_relations = (await db.execute(stmt)).scalar_one()
+        """为分镜映射生成多个候选视频（不清理旧片段，追加新候选）。"""
+        scene_with_relations = await self._load_scene_with_relations(scene.id, db)
 
-        # 查询该场景已有的最大 candidate_index
         existing_clips = (await db.execute(
             select(VideoClip).where(VideoClip.scene_id == scene_with_relations.id)
         )).scalars().all()
@@ -190,79 +306,37 @@ class VideoGeneratorService:
         max_candidate = max((c.candidate_index for c in existing_clips), default=-1)
 
         reference_image_url = self._pick_reference_image(scene_with_relations)
-        durations = self._split_durations(
-            scene_with_relations.duration_seconds,
-            self._provider.max_duration_seconds,
-        )
         all_new_clips: list[VideoClip] = []
 
         for candidate_offset in range(candidate_count):
             candidate_idx = max_candidate + 1 + candidate_offset
-            # 首批候选中第一个自动选中（仅当场景之前没有任何 clip 时）
             auto_select = (not has_existing) and (candidate_offset == 0)
-
-            for clip_order, duration in enumerate(durations):
-                req = VideoGenerateRequest(
-                    prompt=scene_with_relations.video_prompt or "",
-                    duration_seconds=duration,
-                    negative_prompt=scene_with_relations.negative_prompt,
-                    reference_image_url=reference_image_url,
-                    seed=self._seed_for(scene_with_relations, clip_order, candidate_idx),
+            clip_requests = self._build_clip_requests(
+                scene_with_relations,
+                reference_image_url,
+                candidate_index=candidate_idx,
+            )
+            all_new_clips.extend(
+                await self._generate_request_batch(
+                    scene_with_relations,
+                    db,
+                    clip_requests,
+                    candidate_index=candidate_idx,
+                    is_selected=auto_select,
                 )
-
-                try:
-                    task_id = await self._provider.generate(req)
-                    status = await self._wait_for_completion(task_id)
-
-                    if status.status.lower() == CLIP_STATUS_COMPLETED:
-                        project_dir = self._output_dir / scene_with_relations.project_id
-                        project_dir.mkdir(parents=True, exist_ok=True)
-                        output_path = project_dir / f"{scene_with_relations.id}_{clip_order}_c{candidate_idx}_{task_id}.mp4"
-                        local_file = await self._provider.download(task_id, output_path)
-                        clip = VideoClip(
-                            scene_id=scene_with_relations.id,
-                            clip_order=clip_order,
-                            candidate_index=candidate_idx,
-                            is_selected=auto_select,
-                            file_path=str(local_file),
-                            duration_seconds=req.duration_seconds,
-                            provider_task_id=task_id,
-                            status=CLIP_STATUS_COMPLETED,
-                        )
-                    else:
-                        clip = VideoClip(
-                            scene_id=scene_with_relations.id,
-                            clip_order=clip_order,
-                            candidate_index=candidate_idx,
-                            is_selected=False,
-                            duration_seconds=req.duration_seconds,
-                            provider_task_id=task_id,
-                            status=CLIP_STATUS_FAILED,
-                            error_message=status.error_message or f"任务状态: {status.status}",
-                        )
-                except Exception as e:
-                    logger.error(
-                        "场景 %s 候选 %d 片段 %d 生成失败: %s",
-                        scene_with_relations.id, candidate_idx, clip_order, e,
-                    )
-                    clip = VideoClip(
-                        scene_id=scene_with_relations.id,
-                        clip_order=clip_order,
-                        candidate_index=candidate_idx,
-                        is_selected=False,
-                        duration_seconds=duration,
-                        status=CLIP_STATUS_FAILED,
-                        error_message=str(e),
-                    )
-
-                db.add(clip)
-                all_new_clips.append(clip)
+            )
 
         await db.flush()
         return all_new_clips
 
-    async def generate_all(self, project_id: str, db: AsyncSession) -> None:
-        """批量生成项目所有场景的视频"""
+    async def generate_all(
+        self,
+        project_id: str,
+        db: AsyncSession,
+        *,
+        scene_ids: set[str] | None = None,
+    ) -> None:
+        """批量生成项目所有分镜映射的视频。"""
         stmt = (
             select(Scene)
             # 兼容异常中断后遗留的 generating 状态，允许后续重跑恢复。
@@ -270,27 +344,29 @@ class VideoGeneratorService:
             .options(selectinload(Scene.characters).selectinload(SceneCharacter.character))
             .order_by(Scene.sequence_order)
         )
+        if scene_ids:
+            stmt = stmt.where(Scene.id.in_(list(scene_ids)))
         scenes = (await db.execute(stmt)).scalars().all()
         total = len(scenes)
 
         if total == 0:
             publish_progress(project_id, "generate_complete", {
-                "message": "没有需要生成的场景",
-                "percent": 100,
+                PROGRESS_KEY_MESSAGE: "没有需要生成的分镜",
+                PROGRESS_KEY_PERCENT: 100,
             })
             return
 
         for idx, scene in enumerate(scenes):
             publish_progress(project_id, "generate_progress", {
-                "message": f"正在生成场景 {idx + 1}/{total}: {scene.title}",
-                "percent": round((idx / total) * 100),
-                "scene_id": scene.id,
+                PROGRESS_KEY_MESSAGE: f"正在生成分镜 {idx + 1}/{total}: {scene.title}",
+                PROGRESS_KEY_PERCENT: round((idx / total) * 100),
+                PROGRESS_KEY_PANEL_ORDER: idx + 1,
             })
 
             await self.generate_scene(scene, db)
 
         await db.commit()
         publish_progress(project_id, "generate_complete", {
-            "message": f"全部 {total} 个场景生成完成",
-            "percent": 100,
+            PROGRESS_KEY_MESSAGE: f"全部 {total} 个分镜生成完成",
+            PROGRESS_KEY_PERCENT: 100,
         })

@@ -1,10 +1,9 @@
 import { useMemo } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { App as AntdApp, Button, Card, Empty, Space } from 'antd'
+import { App as AntdApp, Button, Card, Empty, Space, Tag } from 'antd'
 import { ReloadOutlined, RocketOutlined } from '@ant-design/icons'
-import { useTaskStore } from '../../stores/taskStore'
 import PageHeader from '../../components/PageHeader'
-import { cancelTaskRecord, dismissTaskRecord } from '../../api/tasks'
+import { cancelTaskRecord, dismissFailedTaskRecords, dismissTaskRecord, retryTaskRecord } from '../../api/tasks'
 import { getApiErrorMessage } from '../../utils/error'
 import TaskRecordList from '../../components/TaskRecordList'
 import { sortTaskRecordsByUpdatedAt, summarizeTaskRecords } from '../../utils/taskRecords'
@@ -13,7 +12,6 @@ import useTaskRecords from '../../hooks/useTaskRecords'
 export default function TaskHub() {
   const navigate = useNavigate()
   const { message } = AntdApp.useApp()
-  const { setPanelOpen } = useTaskStore()
   const { tasks, loading, refresh } = useTaskRecords({
     enabled: true,
     limit: 200,
@@ -24,16 +22,35 @@ export default function TaskHub() {
   })
   const sortedTasks = useMemo(() => sortTaskRecordsByUpdatedAt(tasks), [tasks])
   const counts = useMemo(() => summarizeTaskRecords(sortedTasks), [sortedTasks])
+  const failedTaskIds = useMemo(
+    () => sortedTasks.filter((task) => task.ready && !task.successful).map((task) => task.id),
+    [sortedTasks],
+  )
 
   return (
     <section className="np-page">
       <PageHeader
         kicker="任务编排"
-        title="任务中心"
-        subtitle="统一查看解析、生成、合成任务状态，并支持手动刷新和清理。"
+        title="全局任务中心"
+        subtitle="以全局视角统一查看解析、生成、合成任务状态，并支持手动刷新和清理。"
         actions={(
           <Space>
-            <Button onClick={() => setPanelOpen(true)}>打开右侧抽屉</Button>
+            <Button
+              disabled={failedTaskIds.length === 0}
+              onClick={() => {
+                void (async () => {
+                  try {
+                    const result = await dismissFailedTaskRecords({ task_ids: failedTaskIds })
+                    await refresh({ showLoading: false })
+                    message.success(`已忽略失败任务 ${result.dismissed} 条`)
+                  } catch (error) {
+                    message.error(getApiErrorMessage(error, '批量忽略失败任务失败'))
+                  }
+                })()
+              }}
+            >
+              忽略失败任务（{failedTaskIds.length}）
+            </Button>
             <Button icon={<ReloadOutlined />} loading={loading} onClick={() => void refresh({ showLoading: true })}>
               刷新任务
             </Button>
@@ -42,6 +59,13 @@ export default function TaskHub() {
       />
 
       <div className="np-page-scroll">
+        <Card size="small" className="np-panel-card" style={{ marginBottom: 12 }}>
+          <Space size={12} wrap align="center">
+            <Tag className="np-status-tag">当前视角：全局</Tag>
+            <Tag className="np-status-tag">任务数：{sortedTasks.length}</Tag>
+          </Space>
+        </Card>
+
         <div className="np-kpi-grid">
           <article className="np-kpi-card">
             <p className="np-kpi-label">执行中</p>
@@ -59,9 +83,7 @@ export default function TaskHub() {
 
         {sortedTasks.length === 0 ? (
           <Card className="np-panel-card">
-            <Empty
-              description="暂无任务记录。执行“解析剧本 / 开始生成 / 开始合成”后会自动记录。"
-            >
+            <Empty description="暂无任务记录。执行“解析剧本 / 开始生成 / 开始合成”后会自动记录。">
               <Button type="primary" icon={<RocketOutlined />} onClick={() => navigate('/projects')}>
                 去项目工作台
               </Button>
@@ -85,6 +107,15 @@ export default function TaskHub() {
                 await refresh({ showLoading: false })
               } catch (error) {
                 message.error(getApiErrorMessage(error, '忽略任务失败'))
+              }
+            }}
+            onRetryTask={async (task) => {
+              try {
+                await retryTaskRecord(task.id)
+                await refresh({ showLoading: false })
+                message.success('重试任务已提交')
+              } catch (error) {
+                message.error(getApiErrorMessage(error, '重试任务失败'))
               }
             }}
           />

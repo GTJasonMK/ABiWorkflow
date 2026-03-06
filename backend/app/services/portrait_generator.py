@@ -20,7 +20,7 @@ def _build_v1_base_url(raw_base: str) -> str:
     """确保 base_url 以 /v1 结尾。"""
     base = raw_base.strip().rstrip("/")
     if not base:
-        raise ValueError("GGK_BASE_URL 未配置，无法生成立绘")
+        raise ValueError("PORTRAIT_API_BASE_URL 未配置，无法生成立绘")
     if base.endswith("/v1"):
         return base
     return f"{base}/v1"
@@ -95,31 +95,57 @@ async def generate_portrait(
     Raises:
         ValueError: 配置缺失或生图 API 返回中未找到图片。
     """
-    api_base = _build_v1_base_url(settings.ggk_base_url)
-
-    if not settings.ggk_api_key.strip():
-        raise ValueError("GGK_API_KEY 未配置，无法生成立绘")
-
     prompt = _build_portrait_prompt(name, appearance, costume, personality)
+    return await generate_image_from_prompt(character_id, prompt)
+
+
+def _sanitize_output_subdir(subdir: str | None) -> Path:
+    """清理并限制输出子目录，避免路径穿越。"""
+    raw = (subdir or "").strip().replace("\\", "/").strip("/")
+    if not raw:
+        return Path(".")
+    parts = [part for part in raw.split("/") if part and part not in {".", ".."}]
+    return Path(*parts) if parts else Path(".")
+
+
+async def generate_image_from_prompt(
+    asset_id: str,
+    prompt: str,
+    *,
+    output_subdir: str | None = None,
+) -> str:
+    """按提示词生成图片并落盘，返回可访问的媒体 URL（/media/portraits/...）。"""
+    prompt_text = (prompt or "").strip()
+    if not prompt_text:
+        raise ValueError("提示词为空，无法生成图片")
+
+    api_base = _build_v1_base_url(settings.portrait_api_base_url)
+    if not settings.portrait_api_key.strip():
+        raise ValueError("PORTRAIT_API_KEY 未配置，无法生成图片")
 
     # xAI /v1/images/generations 端点请求格式
     payload = {
         "model": settings.portrait_image_model,
-        "prompt": prompt,
+        "prompt": prompt_text,
         "n": 1,
         "response_format": "url",
     }
 
     headers = {
-        "Authorization": f"Bearer {settings.ggk_api_key}",
+        "Authorization": f"Bearer {settings.portrait_api_key}",
         "Content-Type": "application/json",
     }
 
     endpoint = f"{api_base}/images/generations"
     timeout = settings.portrait_request_timeout_seconds
-    logger.info("开始生成立绘: character=%s, model=%s, endpoint=%s",
-                character_id, settings.portrait_image_model, endpoint)
-    logger.debug("立绘提示词: %s", prompt)
+    logger.info(
+        "开始生成图片: asset_id=%s, model=%s, endpoint=%s, subdir=%s",
+        asset_id,
+        settings.portrait_image_model,
+        endpoint,
+        output_subdir or ".",
+    )
+    logger.debug("生图提示词: %s", prompt_text)
 
     async with httpx.AsyncClient(timeout=timeout) as client:
         response = await client.post(endpoint, headers=headers, json=payload)
@@ -141,33 +167,45 @@ async def generate_portrait(
         raise ValueError(f"生图 API 返回中未找到图片数据: {str(body)[:300]}")
 
     # 准备本地存储
-    output_dir = resolve_runtime_path(settings.portrait_output_dir)
+    output_root = resolve_runtime_path(settings.portrait_output_dir)
+    output_root.mkdir(parents=True, exist_ok=True)
+    safe_subdir = _sanitize_output_subdir(output_subdir)
+    output_dir = output_root if str(safe_subdir) == "." else (output_root / safe_subdir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     if image_bytes:
         # base64 内嵌图片 → 直接写入文件
         ext = _guess_extension_from_bytes(image_bytes)
-        local_filename = f"{character_id}{ext}"
+        local_filename = f"{asset_id}{ext}"
         local_path = output_dir / local_filename
         local_path.write_bytes(image_bytes)
-        logger.info("角色立绘已生成（base64）: character=%s, path=%s, size=%d bytes",
-                    character_id, local_path, len(image_bytes))
+        logger.info(
+            "图片已生成（base64）: asset_id=%s, path=%s, size=%d bytes",
+            asset_id,
+            local_path,
+            len(image_bytes),
+        )
     else:
         # URL → 下载到本地
         assert image_url is not None
         ext = _guess_extension(image_url)
-        local_filename = f"{character_id}{ext}"
+        local_filename = f"{asset_id}{ext}"
         local_path = output_dir / local_filename
 
-        logger.info("下载立绘图片: %s → %s", image_url, local_path)
+        logger.info("下载图片: %s → %s", image_url, local_path)
         async with httpx.AsyncClient(timeout=timeout) as client:
             img_response = await client.get(image_url, follow_redirects=True)
             img_response.raise_for_status()
             local_path.write_bytes(img_response.content)
-        logger.info("角色立绘已生成: character=%s, path=%s, size=%d bytes",
-                    character_id, local_path, local_path.stat().st_size)
+        logger.info(
+            "图片已生成: asset_id=%s, path=%s, size=%d bytes",
+            asset_id,
+            local_path,
+            local_path.stat().st_size,
+        )
 
-    return f"/media/portraits/{local_filename}"
+    media_rel_path = local_path.relative_to(output_root).as_posix()
+    return f"/media/portraits/{media_rel_path}"
 
 
 def _guess_extension(url: str) -> str:

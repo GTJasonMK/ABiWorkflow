@@ -2,6 +2,26 @@ import client from './client'
 import type { ApiResponse } from '../types/api'
 import type { TaskRecord } from '../types/taskRecord'
 
+/* ── 异步任务参数构建（原 taskParams.ts） ── */
+
+export interface StartTaskOptions {
+  forceRecover?: boolean
+  forceRegenerate?: boolean
+}
+
+export function buildAsyncTaskQuery(options: StartTaskOptions = {}): string {
+  const query = new URLSearchParams({ async_mode: 'true' })
+  if (options.forceRecover) {
+    query.set('force_recover', 'true')
+  }
+  if (options.forceRegenerate) {
+    query.set('force_regenerate', 'true')
+  }
+  return query.toString()
+}
+
+/* ── 任务状态 ── */
+
 export interface TaskStatusPayload {
   task_id: string
   state: string
@@ -42,8 +62,21 @@ export async function dismissTaskRecord(taskId: string): Promise<TaskRecord> {
   return resp.data.data!
 }
 
+export async function dismissFailedTaskRecords(payload: {
+  project_id?: string
+  task_ids?: string[]
+} = {}): Promise<{ dismissed: number }> {
+  const resp = await client.post<ApiResponse<{ dismissed: number }>>('/tasks/dismiss-failed', payload)
+  return resp.data.data ?? { dismissed: 0 }
+}
+
 export async function cancelTaskRecord(taskId: string): Promise<TaskStatusPayload> {
   const resp = await client.post<ApiResponse<TaskStatusPayload>>(`/tasks/${taskId}/cancel`, {})
+  return resp.data.data!
+}
+
+export async function retryTaskRecord(taskId: string): Promise<TaskRecord> {
+  const resp = await client.post<ApiResponse<TaskRecord>>(`/tasks/${taskId}/retry`, {})
   return resp.data.data!
 }
 
@@ -96,4 +129,27 @@ export async function waitForTask(
 
     await new Promise((resolve) => setTimeout(resolve, intervalMs))
   }
+}
+
+/**
+ * 统一处理可能返回异步任务的 API 调用。
+ * 如果返回值含 task_id 则自动轮询等待完成并返回任务结果；
+ * 否则直接返回原始结果。
+ */
+export async function resolveAsyncResult(
+  startResult: Record<string, unknown>,
+  options?: { timeoutMs?: number },
+): Promise<Record<string, unknown>> {
+  if (
+    typeof startResult === 'object' &&
+    startResult !== null &&
+    'task_id' in startResult &&
+    typeof startResult.task_id === 'string'
+  ) {
+    const finalStatus = await waitForTask(startResult.task_id, {
+      timeoutMs: options?.timeoutMs,
+    })
+    return finalStatus.result ?? {}
+  }
+  return startResult
 }

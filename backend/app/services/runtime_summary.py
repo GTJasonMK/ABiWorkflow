@@ -3,18 +3,8 @@ from __future__ import annotations
 from urllib.parse import urlsplit, urlunsplit
 
 from app.config import settings
-
-
-def _active_llm_model() -> str:
-    if settings.llm_provider == "openai":
-        return settings.openai_model
-    if settings.llm_provider == "anthropic":
-        return settings.anthropic_model
-    if settings.llm_provider == "deepseek":
-        return settings.deepseek_model
-    if settings.llm_provider == "ggk":
-        return settings.ggk_text_model
-    return "unknown"
+from app.services.json_codec import from_json_text
+from app.services.queue_runtime import get_queue_runtime_state
 
 
 def _mask_key_preview(secret: str) -> str | None:
@@ -41,15 +31,8 @@ def _mask_url_credentials(url: str) -> str:
 
 def build_runtime_summary(*, celery_worker_online: bool) -> dict[str, object]:
     """组装前端系统设置页使用的运行时摘要。"""
-    openai_key_configured = bool(settings.openai_api_key)
-    anthropic_key_configured = bool(settings.anthropic_api_key)
-    deepseek_key_configured = bool(settings.deepseek_api_key)
-    ggk_key_configured = bool(settings.ggk_api_key)
-
-    active_model = _active_llm_model()
-    llm_key_configured = bool(
-        openai_key_configured or anthropic_key_configured or deepseek_key_configured or ggk_key_configured
-    )
+    llm_key_configured = bool(settings.llm_api_key)
+    queue_state = get_queue_runtime_state()
 
     return {
         "app": {
@@ -58,38 +41,20 @@ def build_runtime_summary(*, celery_worker_online: bool) -> dict[str, object]:
             "database_url": _mask_url_credentials(settings.database_url),
         },
         "llm": {
-            "provider": settings.llm_provider,
-            "active_model": active_model,
-            "any_key_configured": llm_key_configured,
-            "openai": {
-                "model": settings.openai_model,
-                "base_url": settings.openai_base_url,
-                "api_key_configured": openai_key_configured,
-                "api_key_preview": _mask_key_preview(settings.openai_api_key),
-            },
-            "anthropic": {
-                "model": settings.anthropic_model,
-                "api_key_configured": anthropic_key_configured,
-                "api_key_preview": _mask_key_preview(settings.anthropic_api_key),
-            },
-            "deepseek": {
-                "model": settings.deepseek_model,
-                "base_url": settings.deepseek_base_url,
-                "api_key_configured": deepseek_key_configured,
-                "api_key_preview": _mask_key_preview(settings.deepseek_api_key),
-            },
-            "ggk": {
-                "base_url": settings.ggk_base_url,
-                "text_model": settings.ggk_text_model,
-                "api_key_configured": ggk_key_configured,
-                "api_key_preview": _mask_key_preview(settings.ggk_api_key),
-            },
+            "model": settings.llm_model,
+            "base_url": settings.llm_base_url,
+            "api_key_configured": llm_key_configured,
+            "api_key_preview": _mask_key_preview(settings.llm_api_key),
         },
         "queue": {
             "redis_url": _mask_url_credentials(settings.redis_url),
             "celery_broker_url": _mask_url_credentials(settings.celery_broker_url),
             "celery_result_backend": _mask_url_credentials(settings.celery_result_backend),
             "celery_worker_online": celery_worker_online,
+            "queue_mode": queue_state.mode,
+            "redis_available": queue_state.redis_available,
+            "fallback_active": queue_state.fallback_active,
+            "fallback_reason": queue_state.fallback_reason,
         },
         "video": {
             "provider": settings.video_provider,
@@ -98,6 +63,7 @@ def build_runtime_summary(*, celery_worker_online: bool) -> dict[str, object]:
             "provider_max_duration_seconds": settings.video_provider_max_duration_seconds,
             "poll_interval_seconds": settings.video_poll_interval_seconds,
             "task_timeout_seconds": settings.video_task_timeout_seconds,
+            "project_asset_publish_global_default": settings.project_asset_publish_global_default,
             "tts_voice": settings.tts_voice,
             "http_provider": {
                 "base_url": settings.video_http_base_url,
@@ -113,6 +79,9 @@ def build_runtime_summary(*, celery_worker_online: bool) -> dict[str, object]:
                 "request_timeout_seconds": settings.video_http_request_timeout_seconds,
             },
             "ggk_provider": {
+                "base_url": settings.ggk_base_url,
+                "api_key_configured": bool(settings.ggk_api_key),
+                "api_key_preview": _mask_key_preview(settings.ggk_api_key),
                 "video_model": settings.ggk_video_model,
                 "aspect_ratio": settings.ggk_video_aspect_ratio,
                 "resolution": settings.ggk_video_resolution,
@@ -120,5 +89,15 @@ def build_runtime_summary(*, celery_worker_online: bool) -> dict[str, object]:
                 "model_duration_profiles": settings.ggk_video_model_duration_profiles,
                 "request_timeout_seconds": settings.ggk_request_timeout_seconds,
             },
+            "portrait": {
+                "api_base_url": settings.portrait_api_base_url,
+                "api_key_configured": bool(settings.portrait_api_key),
+                "api_key_preview": _mask_key_preview(settings.portrait_api_key),
+                "image_model": settings.portrait_image_model,
+            },
+        },
+        "models": {
+            "default_bindings": from_json_text(settings.default_model_bindings, {}),
+            "capability_profiles": from_json_text(settings.model_capability_profiles, {}),
         },
     }

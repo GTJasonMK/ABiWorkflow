@@ -1,5 +1,6 @@
 import client from './client'
 import type { ApiResponse } from '../types/api'
+import { resolveBackendUrl } from '../utils/backendUrl'
 
 export interface AssetClip {
   id: string
@@ -15,9 +16,10 @@ export interface AssetClip {
   updated_at: string | null
 }
 
-export interface AssetScene {
-  scene_id: string
-  sequence_order: number
+export interface AssetPanel {
+  panel_id: string
+  episode_id: string
+  panel_order: number
   title: string
   status: string
   duration_seconds: number
@@ -43,17 +45,35 @@ export interface ProjectAssetsPayload {
   project_id: string
   project_name: string
   summary: {
-    scene_count: number
+    panel_count: number
     clip_count: number
     ready_clip_count: number
     failed_clip_count: number
     composition_count: number
   }
-  scenes: AssetScene[]
+  panels: AssetPanel[]
   compositions: AssetComposition[]
 }
 
 const inflightRequests = new Map<string, Promise<ProjectAssetsPayload>>()
+
+function normalizeProjectAssetsPayload(payload: ProjectAssetsPayload): ProjectAssetsPayload {
+  return {
+    ...payload,
+    panels: payload.panels.map((panel) => ({
+      ...panel,
+      clips: panel.clips.map((clip) => ({
+        ...clip,
+        media_url: resolveBackendUrl(clip.media_url),
+      })),
+    })),
+    compositions: payload.compositions.map((item) => ({
+      ...item,
+      media_url: resolveBackendUrl(item.media_url),
+      download_url: resolveBackendUrl(item.download_url) ?? item.download_url,
+    })),
+  }
+}
 
 /** 获取项目媒体资产 */
 export async function getProjectAssets(projectId: string): Promise<ProjectAssetsPayload> {
@@ -65,7 +85,7 @@ export async function getProjectAssets(projectId: string): Promise<ProjectAssets
     if (!resp.data?.data) {
       throw new Error('获取媒体资产失败：响应格式非法')
     }
-    return resp.data.data
+    return normalizeProjectAssetsPayload(resp.data.data)
   })()
 
   inflightRequests.set(projectId, request)

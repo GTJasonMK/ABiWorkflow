@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Button, Input, Modal, Form, Table, Tag, Space, Popconfirm, Tooltip, App as AntdApp } from 'antd'
-import { ApartmentOutlined, PlusOutlined, EditOutlined, DeleteOutlined, RightOutlined, CopyOutlined } from '@ant-design/icons'
+import { Button, Input, Modal, Form, Table, Tag, Space, Dropdown, App as AntdApp } from 'antd'
+import { PlusOutlined, DeleteOutlined, RightOutlined, CopyOutlined, EllipsisOutlined } from '@ant-design/icons'
 import type { ColumnsType, TableProps } from 'antd/es/table'
 import type { SorterResult } from 'antd/es/table/interface'
 import { useProjectStore } from '../../stores/projectStore'
@@ -9,7 +9,6 @@ import { STATUS_MAP } from '../../types/project'
 import type { ProjectListItem, ProjectStatus } from '../../types/project'
 import PageHeader from '../../components/PageHeader'
 import { getApiErrorMessage } from '../../utils/error'
-import { getTargetStepKey } from '../../utils/workflow'
 
 const ALL_STATUSES = Object.keys(STATUS_MAP) as ProjectStatus[]
 
@@ -129,7 +128,7 @@ export default function ProjectList() {
       ellipsis: true,
       width: 200,
       render: (name: string, record) => (
-        <button type="button" className="np-project-link" onClick={() => navigate(`/projects/${record.id}/${getTargetStepKey(record.status)}`)}>
+        <button type="button" className="np-project-link" onClick={() => navigate(`/projects/${record.id}/script`)}>
           {name}
         </button>
       ),
@@ -151,9 +150,9 @@ export default function ProjectList() {
       },
     },
     {
-      title: '场景',
-      dataIndex: 'scene_count',
-      key: 'scene_count',
+      title: '分镜',
+      dataIndex: 'panel_count',
+      key: 'panel_count',
       width: 60,
       align: 'center',
     },
@@ -176,44 +175,48 @@ export default function ProjectList() {
     {
       title: '操作',
       key: 'actions',
-      width: 190,
+      width: 140,
       fixed: 'right',
       render: (_, record) => (
         <Space size={4}>
-          <Tooltip title="编辑剧本">
-            <Button
-              size="small"
-              icon={<EditOutlined />}
-              onClick={() => navigate(`/projects/${record.id}/script`)}
-            />
-          </Tooltip>
-          <Tooltip title="继续工作流">
-            <Button
-              size="small"
-              type="primary"
-              icon={<RightOutlined />}
-              onClick={() => navigate(`/projects/${record.id}/${getTargetStepKey(record.status)}`)}
-            />
-          </Tooltip>
-          <Tooltip title="分镜模式">
-            <Button
-              size="small"
-              icon={<ApartmentOutlined />}
-              onClick={() => navigate(`/projects/${record.id}/scenes?mode=episode`)}
-            />
-          </Tooltip>
-          <Tooltip title="复制项目">
-            <Button
-              size="small"
-              icon={<CopyOutlined />}
-              onClick={() => handleDuplicate(record.id)}
-            />
-          </Tooltip>
-          <Popconfirm title="确认删除此项目？" onConfirm={() => handleDelete(record.id)}>
-            <Tooltip title="删除">
-              <Button size="small" danger icon={<DeleteOutlined />} />
-            </Tooltip>
-          </Popconfirm>
+          <Button
+            size="small"
+            type="primary"
+            icon={<RightOutlined />}
+            onClick={() => navigate(`/projects/${record.id}/script`)}
+          >
+            继续
+          </Button>
+          <Dropdown
+            menu={{
+              items: [
+                {
+                  key: 'duplicate',
+                  icon: <CopyOutlined />,
+                  label: '复制项目',
+                  onClick: () => handleDuplicate(record.id),
+                },
+                {
+                  key: 'delete',
+                  icon: <DeleteOutlined />,
+                  label: '删除项目',
+                  danger: true,
+                  onClick: () => {
+                    Modal.confirm({
+                      title: '确认删除此项目？',
+                      onOk: () => handleDelete(record.id),
+                      okText: '删除',
+                      cancelText: '取消',
+                      okButtonProps: { danger: true },
+                    })
+                  },
+                },
+              ],
+            }}
+            trigger={['click']}
+          >
+            <Button size="small" icon={<EllipsisOutlined />} />
+          </Dropdown>
         </Space>
       ),
     },

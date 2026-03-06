@@ -37,3 +37,13 @@ class Project(Base):
     panels: Mapped[list["Panel"]] = relationship(
         "Panel", back_populates="project", cascade="all, delete-orphan", order_by="Panel.panel_order"
     )
+    script_entities: Mapped[list["ScriptEntity"]] = relationship(
+        "ScriptEntity",
+        back_populates="project",
+        cascade="all, delete-orphan",
+    )
+    script_entity_bindings: Mapped[list["ScriptEntityAssetBinding"]] = relationship(
+        "ScriptEntityAssetBinding",
+        back_populates="project",
+        cascade="all, delete-orphan",
+    )

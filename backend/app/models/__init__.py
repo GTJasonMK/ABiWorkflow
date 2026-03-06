@@ -6,6 +6,13 @@ from app.models.panel import Panel
 from app.models.project import Project
 from app.models.provider_config import ProviderConfig
 from app.models.scene import Scene, SceneCharacter
+from app.models.script_asset import (
+    EpisodeAssetOverride,
+    PanelAssetOverride,
+    PanelEffectiveBinding,
+    ScriptEntity,
+    ScriptEntityAssetBinding,
+)
 from app.models.task_record import TaskEvent, TaskRecord
 from app.models.usage_cost import UsageCost
 from app.models.video_clip import VideoClip
@@ -23,6 +30,11 @@ __all__ = [
     "ProviderConfig",
     "Scene",
     "SceneCharacter",
+    "ScriptEntity",
+    "ScriptEntityAssetBinding",
+    "EpisodeAssetOverride",
+    "PanelAssetOverride",
+    "PanelEffectiveBinding",
     "TaskEvent",
     "TaskRecord",
     "UsageCost",

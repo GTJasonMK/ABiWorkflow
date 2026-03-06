@@ -1,8 +1,0 @@
-============================= test session starts =============================
-collecting ... collected 3 items
-
-backend\tests\test_video_providers\test_ggk_provider.py::test_ggk_provider_should_generate_and_download_video PASSED [ 33%]
-backend\tests\test_video_providers\test_ggk_provider.py::test_ggk_provider_should_fail_when_video_url_missing PASSED [ 66%]
-backend\tests\test_video_providers\test_ggk_provider.py::test_ggk_provider_should_apply_custom_duration_profile PASSED [100%]
-
-============================== 3 passed in 0.24s ==============================

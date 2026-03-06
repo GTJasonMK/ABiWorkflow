@@ -32,3 +32,9 @@ class Episode(Base):
         cascade="all, delete-orphan",
         order_by="Panel.panel_order",
     )
+    asset_overrides: Mapped[list["EpisodeAssetOverride"]] = relationship(
+        "EpisodeAssetOverride",
+        back_populates="episode",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )

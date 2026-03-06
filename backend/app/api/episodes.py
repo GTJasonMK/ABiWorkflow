@@ -5,6 +5,8 @@ from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.project_common import get_episode_or_404
+from app.api.response_utils import isoformat_or_empty
 from app.database import get_db
 from app.models import Episode, Panel
 from app.schemas.common import ApiResponse
@@ -52,16 +54,10 @@ def _to_episode_response(episode: Episode, panel_count: int = 0) -> EpisodeRespo
         script_text=episode.script_text,
         status=episode.status,
         panel_count=panel_count,
-        created_at=episode.created_at.isoformat() if episode.created_at else "",
-        updated_at=episode.updated_at.isoformat() if episode.updated_at else "",
+        created_at=isoformat_or_empty(episode.created_at),
+        updated_at=isoformat_or_empty(episode.updated_at),
     )
 
-
-async def _get_episode_or_404(episode_id: str, db: AsyncSession) -> Episode:
-    episode = (await db.execute(select(Episode).where(Episode.id == episode_id))).scalar_one_or_none()
-    if episode is None:
-        raise HTTPException(status_code=404, detail="分集不存在")
-    return episode
 
 
 @router.get("/projects/{project_id}/episodes", response_model=ApiResponse[list[EpisodeResponse]])
@@ -106,7 +102,7 @@ async def create_episode(project_id: str, body: EpisodeCreate, db: AsyncSession 
 
 @router.get("/episodes/{episode_id}", response_model=ApiResponse[EpisodeResponse])
 async def get_episode(episode_id: str, db: AsyncSession = Depends(get_db)):
-    episode = await _get_episode_or_404(episode_id, db)
+    episode = await get_episode_or_404(episode_id, db)
     panel_count = (await db.execute(
         select(func.count(Panel.id)).where(Panel.episode_id == episode_id)
     )).scalar() or 0
@@ -115,7 +111,7 @@ async def get_episode(episode_id: str, db: AsyncSession = Depends(get_db)):
 
 @router.put("/episodes/{episode_id}", response_model=ApiResponse[EpisodeResponse])
 async def update_episode(episode_id: str, body: EpisodeUpdate, db: AsyncSession = Depends(get_db)):
-    episode = await _get_episode_or_404(episode_id, db)
+    episode = await get_episode_or_404(episode_id, db)
     updates = body.model_dump(exclude_unset=True)
 
     if "title" in updates and updates["title"] is not None:
@@ -140,7 +136,7 @@ async def update_episode(episode_id: str, body: EpisodeUpdate, db: AsyncSession 
 
 @router.delete("/episodes/{episode_id}", response_model=ApiResponse[None])
 async def delete_episode(episode_id: str, db: AsyncSession = Depends(get_db)):
-    episode = await _get_episode_or_404(episode_id, db)
+    episode = await get_episode_or_404(episode_id, db)
     project_id = episode.project_id
     await db.delete(episode)
     await db.flush()

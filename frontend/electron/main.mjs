@@ -1,4 +1,5 @@
 import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron'
+import fs from 'node:fs/promises'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -7,6 +8,39 @@ const __dirname = path.dirname(__filename)
 
 const devServerUrl = process.env.ELECTRON_RENDERER_URL
 const isDev = Boolean(devServerUrl)
+const electronApiBaseUrl = process.env.ELECTRON_API_BASE_URL || 'http://127.0.0.1:8000/api'
+
+function sanitizeFileName(value) {
+  const normalized = String(value || '')
+    .replace(/[<>:"/\\|?*\u0000-\u001F]/g, '_')
+    .trim()
+  return normalized || 'video.mp4'
+}
+
+function guessDefaultFileNameFromUrl(url, fallback = 'video.mp4') {
+  try {
+    const parsed = new URL(url)
+    const lastSegment = decodeURIComponent(parsed.pathname.split('/').filter(Boolean).pop() || '')
+    if (!lastSegment) return fallback
+    const normalized = sanitizeFileName(lastSegment)
+    if (normalized.includes('.')) return normalized
+    return `${normalized}.mp4`
+  } catch {
+    return fallback
+  }
+}
+
+function resolveHttpUrl(rawUrl) {
+  const input = String(rawUrl || '').trim()
+  if (!input) return ''
+  if (/^https?:\/\//i.test(input)) return input
+
+  try {
+    return new URL(input, electronApiBaseUrl).toString()
+  } catch {
+    return input
+  }
+}
 
 ipcMain.handle('abi:pick-directory', async (event, options = {}) => {
   const senderWindow = BrowserWindow.fromWebContents(event.sender) ?? BrowserWindow.getFocusedWindow() ?? undefined
@@ -27,6 +61,50 @@ ipcMain.handle('abi:pick-directory', async (event, options = {}) => {
     return null
   }
   return result.filePaths[0]
+})
+
+ipcMain.handle('abi:save-url-to-file', async (event, options = {}) => {
+  const senderWindow = BrowserWindow.fromWebContents(event.sender) ?? BrowserWindow.getFocusedWindow() ?? undefined
+  const targetUrl = resolveHttpUrl(options?.url)
+  if (!targetUrl) {
+    throw new Error('下载地址不能为空')
+  }
+  if (!/^https?:\/\//i.test(targetUrl)) {
+    throw new Error('下载地址必须为 http(s) URL')
+  }
+
+  const title = typeof options?.title === 'string' && options.title.trim()
+    ? options.title.trim()
+    : '选择导出文件'
+  const preferredName = typeof options?.defaultFileName === 'string' && options.defaultFileName.trim()
+    ? options.defaultFileName.trim()
+    : guessDefaultFileNameFromUrl(targetUrl)
+  const defaultDirectory = typeof options?.defaultPath === 'string' && options.defaultPath.trim()
+    ? options.defaultPath.trim()
+    : app.getPath('downloads')
+  const defaultPath = path.join(defaultDirectory, sanitizeFileName(preferredName))
+
+  const saveDialogResult = await dialog.showSaveDialog(senderWindow, {
+    title,
+    defaultPath,
+    buttonLabel: '导出',
+    properties: ['createDirectory', 'showOverwriteConfirmation', 'dontAddToRecent'],
+    filters: [
+      { name: '视频文件', extensions: ['mp4', 'mov', 'mkv', 'webm'] },
+      { name: '所有文件', extensions: ['*'] },
+    ],
+  })
+  if (saveDialogResult.canceled || !saveDialogResult.filePath) {
+    return { canceled: true, filePath: null }
+  }
+
+  const response = await fetch(targetUrl)
+  if (!response.ok) {
+    throw new Error(`下载失败：HTTP ${response.status}`)
+  }
+  const arrayBuffer = await response.arrayBuffer()
+  await fs.writeFile(saveDialogResult.filePath, Buffer.from(arrayBuffer))
+  return { canceled: false, filePath: saveDialogResult.filePath }
 })
 
 function readIntEnv(name, fallback) {

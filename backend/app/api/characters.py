@@ -3,20 +3,18 @@ from __future__ import annotations
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import delete, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.database import get_db
-from app.models import Character, Project, Scene, SceneCharacter, VideoClip
-from app.project_status import (
-    PROJECT_BUSY_STATUSES,
-    PROJECT_RESET_TO_PARSED_ON_CONTENT_CHANGE,
-    PROJECT_STATUS_PARSED,
+from app.api.project_invalidation import (
+    downgrade_project_after_generation_input_change,
+    invalidate_scene_outputs_for_regeneration,
 )
-from app.scene_status import SCENE_STATUS_PENDING
+from app.database import get_db
+from app.models import Character, Project, SceneCharacter
+from app.project_status import PROJECT_BUSY_STATUSES
 from app.schemas.character import CharacterResponse, CharacterUpdate
 from app.schemas.common import ApiResponse
-from app.services.composition_state import mark_completed_compositions_stale
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/characters", tags=["角色管理"])
@@ -80,16 +78,8 @@ async def update_character(character_id: str, body: CharacterUpdate, db: AsyncSe
             select(SceneCharacter.scene_id).where(SceneCharacter.character_id == character.id)
         )).scalars().all())
         if scene_ids:
-            await db.execute(delete(VideoClip).where(VideoClip.scene_id.in_(scene_ids)))
-            affected_scenes = (await db.execute(
-                select(Scene).where(Scene.id.in_(scene_ids))
-            )).scalars().all()
-            for scene in affected_scenes:
-                scene.status = SCENE_STATUS_PENDING
-
-            if project.status in PROJECT_RESET_TO_PARSED_ON_CONTENT_CHANGE:
-                project.status = PROJECT_STATUS_PARSED
-            await mark_completed_compositions_stale(db, project.id)
+            await invalidate_scene_outputs_for_regeneration(db, scene_ids)
+            await downgrade_project_after_generation_input_change(db, project)
 
     await db.commit()
     await db.refresh(character)

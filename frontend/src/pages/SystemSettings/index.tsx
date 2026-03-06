@@ -1,14 +1,12 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Alert, Button, Form, Space, Spin, App as AntdApp } from 'antd'
-import { ApiOutlined, ReloadOutlined, SaveOutlined } from '@ant-design/icons'
+import { ReloadOutlined, SaveOutlined } from '@ant-design/icons'
 import PageHeader from '../../components/PageHeader'
 import {
   getHealthStatus,
-  importRuntimeFromGgk,
   getRuntimeSummary,
   updateRuntimeSettings,
   type HealthPayload,
-  type GgkImportResultPayload,
   type RuntimeSummaryPayload,
 } from '../../api/system'
 import { getApiBaseUrl, getApiBaseUrlOverride, setApiBaseUrlOverride } from '../../runtime'
@@ -27,7 +25,6 @@ export default function SystemSettings() {
   const { message } = AntdApp.useApp()
   const [loading, setLoading] = useState(false)
   const [saving, setSaving] = useState(false)
-  const [importingGgk, setImportingGgk] = useState(false)
   const [health, setHealth] = useState<HealthPayload | null>(null)
   const [runtime, setRuntime] = useState<RuntimeSummaryPayload | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -104,26 +101,6 @@ export default function SystemSettings() {
     }
   }
 
-  const importSettingsFromGgk = async () => {
-    setImportingGgk(true)
-    try {
-      const result: GgkImportResultPayload = await importRuntimeFromGgk({
-        auto_switch_provider: true,
-      })
-      setRuntime(result.runtime)
-      setError(null)
-      message.success(
-        `已从 GGK 导入配置（来源：${result.source.api_key_source}，${
-          result.source.base_url_reachable ? '已探测到在线服务' : '未探测到在线服务，已写入默认地址'
-        }）。`,
-      )
-    } catch (err) {
-      message.error(getApiErrorMessage(err, '从 GGK 导入配置失败'))
-    } finally {
-      setImportingGgk(false)
-    }
-  }
-
   return (
     <section className="np-page">
       <PageHeader
@@ -134,13 +111,6 @@ export default function SystemSettings() {
           <Space>
             <Button icon={<ReloadOutlined />} onClick={() => void refreshRuntime()} loading={loading}>
               刷新状态
-            </Button>
-            <Button
-              icon={<ApiOutlined />}
-              onClick={() => void importSettingsFromGgk()}
-              loading={importingGgk}
-            >
-              从 GGK 自动导入
             </Button>
             <Button type="primary" icon={<SaveOutlined />} onClick={() => void saveSettings()} loading={saving}>
               保存设置

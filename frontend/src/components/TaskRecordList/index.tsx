@@ -1,7 +1,8 @@
 import { Button, List, Space, Tag, Typography } from 'antd'
-import { CloseCircleOutlined, EyeInvisibleOutlined } from '@ant-design/icons'
+import { CloseCircleOutlined, EyeInvisibleOutlined, RedoOutlined } from '@ant-design/icons'
 import type { TaskRecord } from '../../types/taskRecord'
 import { renderExtendedTaskType, renderTaskStateLabel } from '../../utils/taskPresentation'
+import { resolveTaskScopeLabel, shortTaskId } from '../../utils/taskScope'
 
 const { Text } = Typography
 
@@ -12,6 +13,7 @@ interface TaskRecordListProps {
   mode?: TaskRecordListMode
   onCancelTask?: (task: TaskRecord) => Promise<void> | void
   onDismissTask?: (task: TaskRecord) => Promise<void> | void
+  onRetryTask?: (task: TaskRecord) => Promise<void> | void
 }
 
 function resolveStateClass(task: TaskRecord): string {
@@ -24,6 +26,7 @@ export default function TaskRecordList({
   mode = 'full',
   onCancelTask,
   onDismissTask,
+  onRetryTask,
 }: TaskRecordListProps) {
   if (mode === 'compact') {
     return (
@@ -35,6 +38,7 @@ export default function TaskRecordList({
             <Space size={6} wrap>
               <Tag className="np-status-tag">{renderExtendedTaskType(task.task_type)}</Tag>
               <Tag className={resolveStateClass(task)}>{renderTaskStateLabel(task.status)}</Tag>
+              <Tag className="np-status-tag">{resolveTaskScopeLabel(task)}</Tag>
               <Text type="secondary">进度 {task.progress_percent.toFixed(0)}%</Text>
               <Text type="secondary">{task.id.slice(0, 12)}</Text>
             </Space>
@@ -52,6 +56,7 @@ export default function TaskRecordList({
             <Space size={6}>
               <Tag className="np-status-tag">{renderExtendedTaskType(task.task_type)}</Tag>
               <Tag className={resolveStateClass(task)}>{renderTaskStateLabel(task.status)}</Tag>
+              <Tag className="np-status-tag">{resolveTaskScopeLabel(task)}</Tag>
               {task.target_type && <Tag className="np-status-tag">{task.target_type}</Tag>}
             </Space>
             <Space size={6}>
@@ -61,6 +66,15 @@ export default function TaskRecordList({
                   icon={<CloseCircleOutlined />}
                   onClick={() => {
                     void onCancelTask(task)
+                  }}
+                />
+              )}
+              {task.ready && onRetryTask && (
+                <Button
+                  size="small"
+                  icon={<RedoOutlined />}
+                  onClick={() => {
+                    void onRetryTask(task)
                   }}
                 />
               )}
@@ -77,10 +91,10 @@ export default function TaskRecordList({
           </header>
 
           <div className="np-task-item-body">
-            <Text type="secondary">项目：{task.project_id ? task.project_id.slice(0, 8) : '-'}</Text>
+            <Text type="secondary">项目：{shortTaskId(task.project_id)}</Text>
             <Text type="secondary">任务编号：{task.id.slice(0, 16)}</Text>
             {task.source_task_id && <Text type="secondary">Celery ID：{task.source_task_id.slice(0, 16)}</Text>}
-            {task.target_id && <Text type="secondary">目标：{task.target_id.slice(0, 8)}</Text>}
+            {task.target_id && <Text type="secondary">目标：{shortTaskId(task.target_id)}</Text>}
             <Text type="secondary">进度：{task.progress_percent.toFixed(0)}%</Text>
             <Text type="secondary">
               更新时间：{task.updated_at ? new Date(task.updated_at).toLocaleString('zh-CN') : '-'}
@@ -93,4 +107,3 @@ export default function TaskRecordList({
     </div>
   )
 }
-

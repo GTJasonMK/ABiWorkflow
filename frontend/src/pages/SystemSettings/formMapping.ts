@@ -5,6 +5,15 @@ function normalizeInput(value: string | undefined | null): string {
   return (value ?? '').trim()
 }
 
+function toPrettyJson(value: unknown): string {
+  if (!value || typeof value !== 'object') return '{}'
+  try {
+    return JSON.stringify(value, null, 2)
+  } catch {
+    return '{}'
+  }
+}
+
 function assignIfNonEmpty<T extends keyof RuntimeSettingsUpdatePayload>(
   payload: RuntimeSettingsUpdatePayload,
   key: T,
@@ -20,17 +29,14 @@ export function buildUpdatePayload(values: BackendSettingsFormValues): RuntimeSe
   const payload: RuntimeSettingsUpdatePayload = {
     app_name: normalizeInput(values.app_name),
     debug: values.debug,
-    llm_provider: values.llm_provider,
-    openai_model: normalizeInput(values.openai_model),
-    anthropic_model: normalizeInput(values.anthropic_model),
-    deepseek_model: normalizeInput(values.deepseek_model),
-    ggk_text_model: normalizeInput(values.ggk_text_model),
+    llm_model: normalizeInput(values.llm_model),
     video_provider: normalizeInput(values.video_provider),
     video_output_dir: normalizeInput(values.video_output_dir),
     composition_output_dir: normalizeInput(values.composition_output_dir),
     video_provider_max_duration_seconds: values.video_provider_max_duration_seconds,
     video_poll_interval_seconds: values.video_poll_interval_seconds,
     video_task_timeout_seconds: values.video_task_timeout_seconds,
+    project_asset_publish_global_default: values.project_asset_publish_global_default,
     ggk_video_model: normalizeInput(values.ggk_video_model),
     ggk_video_aspect_ratio: normalizeInput(values.ggk_video_aspect_ratio),
     ggk_video_resolution: normalizeInput(values.ggk_video_resolution),
@@ -46,20 +52,22 @@ export function buildUpdatePayload(values: BackendSettingsFormValues): RuntimeSe
     video_http_result_url_path: normalizeInput(values.video_http_result_url_path),
     video_http_error_path: normalizeInput(values.video_http_error_path),
     video_http_request_timeout_seconds: values.video_http_request_timeout_seconds,
+    portrait_image_model: normalizeInput(values.portrait_image_model),
+    default_model_bindings: normalizeInput(values.default_model_bindings),
+    model_capability_profiles: normalizeInput(values.model_capability_profiles),
   }
 
   // URL 与连接类字段：留空表示不修改已有值，避免空值覆盖 .env 中已有配置。
-  assignIfNonEmpty(payload, 'openai_base_url', values.openai_base_url)
-  assignIfNonEmpty(payload, 'deepseek_base_url', values.deepseek_base_url)
+  assignIfNonEmpty(payload, 'llm_base_url', values.llm_base_url)
   assignIfNonEmpty(payload, 'ggk_base_url', values.ggk_base_url)
   assignIfNonEmpty(payload, 'video_http_base_url', values.video_http_base_url)
+  assignIfNonEmpty(payload, 'portrait_api_base_url', values.portrait_api_base_url)
 
   // 密钥：留空表示不修改已有值。
-  assignIfNonEmpty(payload, 'openai_api_key', values.openai_api_key)
-  assignIfNonEmpty(payload, 'anthropic_api_key', values.anthropic_api_key)
-  assignIfNonEmpty(payload, 'deepseek_api_key', values.deepseek_api_key)
+  assignIfNonEmpty(payload, 'llm_api_key', values.llm_api_key)
   assignIfNonEmpty(payload, 'ggk_api_key', values.ggk_api_key)
   assignIfNonEmpty(payload, 'video_http_api_key', values.video_http_api_key)
+  assignIfNonEmpty(payload, 'portrait_api_key', values.portrait_api_key)
 
   // 连接串：留空表示不修改已有值。
   assignIfNonEmpty(payload, 'database_url', values.database_url)
@@ -74,17 +82,10 @@ export function mapRuntimeToFormValues(runtime: RuntimeSummaryPayload): BackendS
   return {
     app_name: runtime.app.name || 'AbiWorkflow',
     debug: Boolean(runtime.app.debug),
-    llm_provider: (runtime.llm.provider || 'openai') as 'openai' | 'anthropic' | 'deepseek' | 'ggk',
-    openai_model: runtime.llm.openai.model || 'gpt-4o',
-    openai_base_url: runtime.llm.openai.base_url ?? '',
-    openai_api_key: '',
-    anthropic_model: runtime.llm.anthropic.model || 'claude-sonnet-4-20250514',
-    anthropic_api_key: '',
-    deepseek_model: runtime.llm.deepseek.model || 'deepseek-chat',
-    deepseek_base_url: runtime.llm.deepseek.base_url || 'https://api.deepseek.com/v1',
-    deepseek_api_key: '',
-    ggk_base_url: runtime.llm.ggk.base_url ?? '',
-    ggk_text_model: runtime.llm.ggk.text_model || 'grok-3',
+    llm_model: runtime.llm.model || 'gpt-4o',
+    llm_base_url: runtime.llm.base_url ?? '',
+    llm_api_key: '',
+    ggk_base_url: runtime.video.ggk_provider.base_url ?? '',
     ggk_api_key: '',
     video_provider: runtime.video.provider || 'mock',
     video_output_dir: runtime.video.output_dir || './outputs/videos',
@@ -92,6 +93,7 @@ export function mapRuntimeToFormValues(runtime: RuntimeSummaryPayload): BackendS
     video_provider_max_duration_seconds: runtime.video.provider_max_duration_seconds ?? 6,
     video_poll_interval_seconds: runtime.video.poll_interval_seconds ?? 1,
     video_task_timeout_seconds: runtime.video.task_timeout_seconds ?? 300,
+    project_asset_publish_global_default: Boolean(runtime.video.project_asset_publish_global_default),
     ggk_video_model: runtime.video.ggk_provider.video_model || 'grok-imagine-1.0-video',
     ggk_video_aspect_ratio: runtime.video.ggk_provider.aspect_ratio || '16:9',
     ggk_video_resolution: runtime.video.ggk_provider.resolution || 'SD',
@@ -109,6 +111,11 @@ export function mapRuntimeToFormValues(runtime: RuntimeSummaryPayload): BackendS
     video_http_result_url_path: runtime.video.http_provider.result_url_path || 'result_url',
     video_http_error_path: runtime.video.http_provider.error_path || 'error_message',
     video_http_request_timeout_seconds: runtime.video.http_provider.request_timeout_seconds ?? 60,
+    portrait_api_base_url: runtime.video.portrait?.api_base_url ?? '',
+    portrait_api_key: '',
+    portrait_image_model: runtime.video.portrait?.image_model || 'grok-imagine-1.0',
+    default_model_bindings: toPrettyJson(runtime.models?.default_bindings ?? {}),
+    model_capability_profiles: toPrettyJson(runtime.models?.capability_profiles ?? {}),
     // 连接串默认留空，避免覆盖为脱敏值；输入新值才会更新。
     database_url: '',
     redis_url: '',
@@ -119,11 +126,10 @@ export function mapRuntimeToFormValues(runtime: RuntimeSummaryPayload): BackendS
 
 export function resetSensitiveFields(): Partial<BackendSettingsFormValues> {
   return {
-    openai_api_key: '',
-    anthropic_api_key: '',
-    deepseek_api_key: '',
+    llm_api_key: '',
     ggk_api_key: '',
     video_http_api_key: '',
+    portrait_api_key: '',
     database_url: '',
     redis_url: '',
     celery_broker_url: '',

@@ -13,38 +13,20 @@ export interface RuntimeSummaryPayload {
     database_url: string
   }
   llm: {
-    provider: string
-    active_model: string
-    any_key_configured: boolean
-    openai: {
-      model: string
-      base_url: string | null
-      api_key_configured: boolean
-      api_key_preview: string | null
-    }
-    anthropic: {
-      model: string
-      api_key_configured: boolean
-      api_key_preview: string | null
-    }
-    deepseek: {
-      model: string
-      base_url: string | null
-      api_key_configured: boolean
-      api_key_preview: string | null
-    }
-    ggk: {
-      base_url: string
-      text_model: string
-      api_key_configured: boolean
-      api_key_preview: string | null
-    }
+    model: string
+    base_url: string | null
+    api_key_configured: boolean
+    api_key_preview: string | null
   }
   queue: {
     redis_url: string
     celery_broker_url: string
     celery_result_backend: string
     celery_worker_online: boolean
+    queue_mode: 'redis' | 'sqlite'
+    redis_available: boolean
+    fallback_active: boolean
+    fallback_reason: string | null
   }
   video: {
     provider: string
@@ -53,6 +35,7 @@ export interface RuntimeSummaryPayload {
     provider_max_duration_seconds: number
     poll_interval_seconds: number
     task_timeout_seconds: number
+    project_asset_publish_global_default: boolean
     tts_voice: string
     http_provider: {
       base_url: string
@@ -68,6 +51,9 @@ export interface RuntimeSummaryPayload {
       request_timeout_seconds: number
     }
     ggk_provider: {
+      base_url: string
+      api_key_configured: boolean
+      api_key_preview: string | null
       video_model: string
       aspect_ratio: string
       resolution: string
@@ -75,6 +61,16 @@ export interface RuntimeSummaryPayload {
       model_duration_profiles: string
       request_timeout_seconds: number
     }
+    portrait: {
+      api_base_url: string
+      api_key_configured: boolean
+      api_key_preview: string | null
+      image_model: string
+    }
+  }
+  models: {
+    default_bindings: Record<string, unknown>
+    capability_profiles: Record<string, unknown>
   }
 }
 
@@ -82,18 +78,11 @@ export interface RuntimeSettingsUpdatePayload {
   app_name?: string
   debug?: boolean
   database_url?: string
-  llm_provider?: 'openai' | 'anthropic' | 'deepseek' | 'ggk'
-  openai_api_key?: string
-  openai_model?: string
-  openai_base_url?: string
-  anthropic_api_key?: string
-  anthropic_model?: string
-  deepseek_api_key?: string
-  deepseek_base_url?: string
-  deepseek_model?: string
+  llm_api_key?: string
+  llm_model?: string
+  llm_base_url?: string
   ggk_base_url?: string
   ggk_api_key?: string
-  ggk_text_model?: string
   redis_url?: string
   celery_broker_url?: string
   celery_result_backend?: string
@@ -103,6 +92,7 @@ export interface RuntimeSettingsUpdatePayload {
   video_provider_max_duration_seconds?: number
   video_poll_interval_seconds?: number
   video_task_timeout_seconds?: number
+  project_asset_publish_global_default?: boolean
   video_http_base_url?: string
   video_http_api_key?: string
   video_http_generate_path?: string
@@ -120,25 +110,11 @@ export interface RuntimeSettingsUpdatePayload {
   ggk_video_model_duration_profiles?: string
   ggk_request_timeout_seconds?: number
   tts_voice?: string
-}
-
-export interface GgkImportRequestPayload {
-  project_path?: string
-  base_url?: string
-  prefer_internal_key?: boolean
-  auto_switch_provider?: boolean
-}
-
-export interface GgkImportResultPayload {
-  imported: boolean
-  source: {
-    project_path: string
-    env_path: string
-    db_path: string
-    api_key_source: string
-    base_url_reachable: boolean
-  }
-  runtime: RuntimeSummaryPayload
+  portrait_api_base_url?: string
+  portrait_api_key?: string
+  portrait_image_model?: string
+  default_model_bindings?: string
+  model_capability_profiles?: string
 }
 
 let runtimeRequest: Promise<RuntimeSummaryPayload> | null = null
@@ -151,8 +127,8 @@ function extractWrappedData<T>(payload: unknown): T | null {
 }
 
 function normalizeRuntimeSummary(payload: RuntimeSummaryPayload): RuntimeSummaryPayload {
-  const { app, llm, queue, video } = payload
-  if (!app || !llm || !queue || !video) {
+  const { app, llm, queue, video, models } = payload
+  if (!app || !llm || !queue || !video || !models) {
     throw new Error('获取运行配置失败：响应字段缺失')
   }
   return payload
@@ -201,18 +177,4 @@ export async function updateRuntimeSettings(payload: RuntimeSettingsUpdatePayloa
   }
 
   throw new Error('保存系统配置失败：响应格式非法')
-}
-
-/** 从本地 GGK 项目导入配置 */
-export async function importRuntimeFromGgk(payload: GgkImportRequestPayload = {}): Promise<GgkImportResultPayload> {
-  const resp = await client.post<ApiResponse<GgkImportResultPayload>>('/system/ggk/import', payload)
-  const wrapped = extractWrappedData<GgkImportResultPayload>(resp.data)
-  if (wrapped) {
-    return {
-      ...wrapped,
-      runtime: normalizeRuntimeSummary(wrapped.runtime),
-    }
-  }
-
-  throw new Error('导入 GGK 配置失败：响应格式非法')
 }

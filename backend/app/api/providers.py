@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.response_utils import isoformat_or_none
 from app.database import get_db
 from app.models import ProviderConfig
 from app.schemas.common import ApiResponse
@@ -46,7 +47,11 @@ def _provider_payload(item: ProviderConfig) -> dict[str, Any]:
         "result_path": item.result_path,
         "auth_scheme": item.auth_scheme,
         "api_key_configured": bool(item.api_key),
-        "api_key_preview": (item.api_key[:3] + "***" + item.api_key[-2:]) if item.api_key and len(item.api_key) > 5 else ("***" if item.api_key else None),
+        "api_key_preview": (
+            item.api_key[:3] + "***" + item.api_key[-2:]
+            if item.api_key and len(item.api_key) > 5
+            else ("***" if item.api_key else None)
+        ),
         "api_key_header": item.api_key_header,
         "extra_headers": from_json_text(item.extra_headers_json, {}),
         "request_template": from_json_text(item.request_template_json, {}),
@@ -54,8 +59,8 @@ def _provider_payload(item: ProviderConfig) -> dict[str, Any]:
         "status_mapping": from_json_text(item.status_mapping_json, {}),
         "timeout_seconds": float(item.timeout_seconds or 0.0),
         "enabled": item.enabled,
-        "created_at": item.created_at.isoformat() if item.created_at else None,
-        "updated_at": item.updated_at.isoformat() if item.updated_at else None,
+        "created_at": isoformat_or_none(item.created_at),
+        "updated_at": isoformat_or_none(item.updated_at),
     }
 
 

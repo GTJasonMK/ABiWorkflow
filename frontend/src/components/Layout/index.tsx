@@ -2,46 +2,31 @@ import { Layout, Menu } from 'antd'
 import {
   DashboardOutlined,
   DeploymentUnitOutlined,
-  ProfileOutlined,
   ProjectOutlined,
   ReadOutlined,
   SettingOutlined,
 } from '@ant-design/icons'
 import { Outlet, useNavigate, useLocation } from 'react-router-dom'
-import TaskCenter from '../TaskCenter'
 
 const { Content, Sider } = Layout
 
 const menuItems = [
   {
-    key: '/dashboard',
-    icon: <DashboardOutlined />,
-    label: '总览看板',
+    type: 'group' as const,
+    label: '创作',
+    children: [
+      { key: '/dashboard', icon: <DashboardOutlined />, label: '总览看板' },
+      { key: '/projects', icon: <ProjectOutlined />, label: '项目工作台' },
+    ],
   },
   {
-    key: '/projects',
-    icon: <ProjectOutlined />,
-    label: '项目工作台',
-  },
-  {
-    key: '/tasks',
-    icon: <ProfileOutlined />,
-    label: '任务中心',
-  },
-  {
-    key: '/operations',
-    icon: <DeploymentUnitOutlined />,
-    label: '运营中心',
-  },
-  {
-    key: '/settings',
-    icon: <SettingOutlined />,
-    label: '系统设置',
-  },
-  {
-    key: '/guide',
-    icon: <ReadOutlined />,
-    label: '使用指南',
+    type: 'group' as const,
+    label: '管理',
+    children: [
+      { key: '/operations', icon: <DeploymentUnitOutlined />, label: '运营中心' },
+      { key: '/settings', icon: <SettingOutlined />, label: '系统设置' },
+      { key: '/guide', icon: <ReadOutlined />, label: '使用指南' },
+    ],
   },
 ]
 
@@ -49,9 +34,6 @@ function resolveSelectedKey(pathname: string): string {
   if (pathname === '/dashboard' || pathname.startsWith('/dashboard/')) return '/dashboard'
   if (pathname === '/projects' || pathname.startsWith('/projects/')) {
     return '/projects'
-  }
-  if (pathname === '/tasks' || pathname.startsWith('/tasks/')) {
-    return '/tasks'
   }
   if (pathname === '/operations' || pathname.startsWith('/operations/')) {
     return '/operations'
@@ -78,7 +60,6 @@ export default function AppLayout() {
           <h1 className="np-brand-line">AbiWorkflow 创作控制台</h1>
         </div>
         <div className="np-meta-stack">
-          <TaskCenter />
           <span className="np-meta-pill">剧本到视频</span>
           <span className="np-meta-pill">{editionDate}</span>
           <span className="np-meta-pill">中文版本</span>

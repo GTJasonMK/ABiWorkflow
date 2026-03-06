@@ -47,3 +47,32 @@ async def try_restore_project_status(db: AsyncSession, project_id: str, fallback
         return
     project.status = fallback_status
     await db.commit()
+
+
+async def force_recover_project_status(
+    db: AsyncSession,
+    *,
+    project: Project,
+    busy_status: str,
+    recovered_status: str,
+) -> bool:
+    """在 force_recover 场景下，将项目从忙状态恢复到可操作状态。"""
+    if project.status != busy_status:
+        return False
+    project.status = recovered_status
+    await db.commit()
+    await db.refresh(project)
+    return True
+
+
+async def restore_project_status_and_raise_submit_error(
+    db: AsyncSession,
+    *,
+    project_id: str,
+    fallback_status: str,
+    detail_prefix: str,
+    error: Exception,
+) -> None:
+    """异步任务提交失败时，先尽力恢复项目状态，再统一抛出 500。"""
+    await try_restore_project_status(db, project_id, fallback_status)
+    raise HTTPException(status_code=500, detail=f"{detail_prefix}: {error}") from error

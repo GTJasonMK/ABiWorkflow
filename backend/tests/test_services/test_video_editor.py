@@ -5,33 +5,87 @@ from pathlib import Path
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
-import app.services.video_editor as video_editor_module
-from app.models import Project, Scene
-from app.services.video_editor import CompositionOptions, VideoEditorService
+import app.services.video_editor_media as video_editor_media
+from app.episode_status import EPISODE_STATUS_DRAFT
+from app.models import Episode, Panel, Project
+from app.panel_status import PANEL_STATUS_COMPLETED
+from app.services.video_editor import CompositionOptions, VideoEditorService, load_panels_for_composition
+from app.services.video_editor_types import TransitionType
+
+
+async def _create_episode(
+    db_session: AsyncSession,
+    project: Project,
+    *,
+    episode_order: int = 0,
+    title: str = "第1集",
+) -> Episode:
+    episode = Episode(
+        project_id=project.id,
+        episode_order=episode_order,
+        title=title,
+        summary=None,
+        script_text=None,
+        status=EPISODE_STATUS_DRAFT,
+    )
+    db_session.add(episode)
+    await db_session.flush()
+    return episode
 
 
 @pytest.mark.asyncio
-async def test_compose_should_fail_when_scene_has_no_clip(db_session: AsyncSession):
+async def test_load_panels_for_composition_should_filter_by_episode(db_session: AsyncSession):
     project = Project(name="合成测试项目", status="parsed")
     db_session.add(project)
     await db_session.flush()
 
-    db_session.add(Scene(
-        project_id=project.id,
-        sequence_order=0,
-        title="场景一",
-        video_prompt="prompt-1",
-        duration_seconds=5.0,
-        status="generated",
-    ))
-    db_session.add(Scene(
-        project_id=project.id,
-        sequence_order=1,
-        title="场景二",
-        video_prompt="prompt-2",
-        duration_seconds=5.0,
-        status="generated",
-    ))
+    first_episode = await _create_episode(db_session, project, episode_order=0, title="第1集")
+    second_episode = await _create_episode(db_session, project, episode_order=1, title="第2集")
+
+    db_session.add_all([
+        Panel(
+            project_id=project.id,
+            episode_id=first_episode.id,
+            panel_order=0,
+            title="第一集分镜",
+            duration_seconds=5.0,
+            video_url="https://example.com/ep1.mp4",
+            status=PANEL_STATUS_COMPLETED,
+        ),
+        Panel(
+            project_id=project.id,
+            episode_id=second_episode.id,
+            panel_order=0,
+            title="第二集分镜",
+            duration_seconds=5.0,
+            video_url="https://example.com/ep2.mp4",
+            status=PANEL_STATUS_COMPLETED,
+        ),
+    ])
+    await db_session.commit()
+
+    panels = await load_panels_for_composition(project.id, db_session, episode_id=second_episode.id)
+    assert [panel.title for panel in panels] == ["第二集分镜"]
+
+
+@pytest.mark.asyncio
+async def test_compose_should_fail_when_panel_has_no_video_source(db_session: AsyncSession):
+    project = Project(name="合成测试项目", status="parsed")
+    db_session.add(project)
+    await db_session.flush()
+
+    episode = await _create_episode(db_session, project)
+    db_session.add(
+        Panel(
+            project_id=project.id,
+            episode_id=episode.id,
+            panel_order=0,
+            title="无视频分镜",
+            script_text="这里只写了台词，没有视频",
+            duration_seconds=5.0,
+            status=PANEL_STATUS_COMPLETED,
+        )
+    )
     await db_session.commit()
 
     editor = VideoEditorService()
@@ -52,13 +106,16 @@ def test_resolve_media_path_should_prefer_runtime_path_when_exists(tmp_path: Pat
     cwd_dir = tmp_path / "cwd"
     cwd_dir.mkdir(parents=True, exist_ok=True)
     monkeypatch.chdir(cwd_dir)
-    monkeypatch.setattr(video_editor_module, "resolve_runtime_path", lambda _value: runtime_file)
+    monkeypatch.setattr(video_editor_media, "resolve_runtime_path", lambda _value: runtime_file)
 
-    resolved = VideoEditorService._resolve_media_path("./outputs/videos/clip.mp4")
+    resolved = video_editor_media.resolve_media_path("./outputs/videos/clip.mp4")
     assert resolved == runtime_file.resolve()
 
 
-def test_resolve_media_path_should_fallback_to_cwd_when_runtime_path_missing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+def test_resolve_media_path_should_fallback_to_cwd_when_runtime_path_missing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
     runtime_file = tmp_path / "runtime-missing" / "outputs" / "videos" / "clip.mp4"
 
     cwd_dir = tmp_path / "cwd"
@@ -66,17 +123,13 @@ def test_resolve_media_path_should_fallback_to_cwd_when_runtime_path_missing(tmp
     cwd_file.parent.mkdir(parents=True, exist_ok=True)
     cwd_file.write_bytes(b"cwd")
     monkeypatch.chdir(cwd_dir)
-    monkeypatch.setattr(video_editor_module, "resolve_runtime_path", lambda _value: runtime_file)
+    monkeypatch.setattr(video_editor_media, "resolve_runtime_path", lambda _value: runtime_file)
 
-    resolved = VideoEditorService._resolve_media_path("./outputs/videos/clip.mp4")
+    resolved = video_editor_media.resolve_media_path("./outputs/videos/clip.mp4")
     assert resolved == cwd_file.resolve()
 
 
-def test_safe_crossfade_overlap_should_clamp_to_shorter_clip_duration():
-    overlap = VideoEditorService._safe_crossfade_overlap(left_duration=2.0, right_duration=1.2, requested=3.0)
-    assert overlap == pytest.approx(1.2)
-
-
-def test_safe_crossfade_overlap_should_never_be_negative():
-    overlap = VideoEditorService._safe_crossfade_overlap(left_duration=2.0, right_duration=2.0, requested=-1.0)
-    assert overlap == pytest.approx(0.0)
+def test_resolve_transition_should_map_known_and_unknown_hints():
+    assert video_editor_media.resolve_transition("fade_black", TransitionType.CROSSFADE) == TransitionType.FADE_BLACK
+    assert video_editor_media.resolve_transition("cut", TransitionType.CROSSFADE) == TransitionType.NONE
+    assert video_editor_media.resolve_transition("unexpected", TransitionType.CROSSFADE) == TransitionType.CROSSFADE

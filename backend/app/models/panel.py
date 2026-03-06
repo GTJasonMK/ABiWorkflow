@@ -29,7 +29,6 @@ class Panel(Base):
     reference_image_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
 
     voice_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("global_voices.id"), nullable=True)
-    voice_binding_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     tts_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     tts_audio_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
 
@@ -45,3 +44,16 @@ class Panel(Base):
     project: Mapped["Project"] = relationship("Project", back_populates="panels")
     episode: Mapped["Episode"] = relationship("Episode", back_populates="panels")
     voice: Mapped["GlobalVoice"] = relationship("GlobalVoice", back_populates="panels")
+    asset_overrides: Mapped[list["PanelAssetOverride"]] = relationship(
+        "PanelAssetOverride",
+        back_populates="panel",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+    effective_binding: Mapped["PanelEffectiveBinding | None"] = relationship(
+        "PanelEffectiveBinding",
+        back_populates="panel",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        uselist=False,
+    )

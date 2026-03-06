@@ -62,3 +62,50 @@ def resolve_post_scene_generation_status(previous_status: str) -> str:
         if previous_status in PROJECT_RESTORE_TO_PARSED_OR_COMPLETED
         else PROJECT_STATUS_PARSED
     )
+
+
+def resolve_post_composition_status(previous_status: str, *, scoped_to_episode: bool) -> str:
+    if not scoped_to_episode:
+        return PROJECT_STATUS_COMPLETED
+    return (
+        previous_status
+        if previous_status in PROJECT_RESTORE_TO_PARSED_OR_COMPLETED
+        else PROJECT_STATUS_PARSED
+    )
+
+
+def resolve_composition_failure_status(previous_status: str, *, scoped_to_episode: bool) -> str:
+    if scoped_to_episode:
+        return (
+            previous_status
+            if previous_status in PROJECT_RESTORE_TO_PARSED_OR_COMPLETED
+            else PROJECT_STATUS_PARSED
+        )
+    return (
+        PROJECT_STATUS_FAILED
+        if previous_status != PROJECT_STATUS_COMPLETED
+        else PROJECT_STATUS_COMPLETED
+    )
+
+
+def resolve_generation_completion_status(
+    previous_status: str,
+    *,
+    scoped_to_episode: bool,
+    scope_all_done: bool,
+) -> str:
+    if scoped_to_episode:
+        return resolve_post_scene_generation_status(previous_status)
+    if scope_all_done:
+        return resolve_post_scene_generation_status(previous_status)
+    return PROJECT_STATUS_FAILED
+
+
+def resolve_generation_failure_status(previous_status: str, *, scoped_to_episode: bool) -> str:
+    if scoped_to_episode:
+        return resolve_post_scene_generation_status(previous_status)
+    return (
+        PROJECT_STATUS_FAILED
+        if previous_status != PROJECT_STATUS_COMPLETED
+        else PROJECT_STATUS_COMPLETED
+    )

@@ -1,9 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { getProjectAssets, type ProjectAssetsPayload } from '../../api/assets'
-import { getAssetHubOverview } from '../../api/assetHub'
 import { getProjectCosts } from '../../api/costs'
 import { useProjectStore } from '../../stores/projectStore'
-import type { AssetHubOverview } from '../../types/assetHub'
+import { useAssetHubStore } from '../../stores/assetHubStore'
 import type { CostListPayload } from '../../types/cost'
 import { getApiErrorMessage } from '../../utils/error'
 
@@ -23,7 +22,8 @@ export default function useOperationsData({ activeTab, notifyError }: UseOperati
   const { projects, fetchProjects, loading: projectLoading } = useProjectStore()
   const notifyErrorRef = useRef(notifyError)
 
-  const [projectId, setProjectId] = useState<string | null>(null)
+  const [costProjectId, setCostProjectId] = useState<string | null>(null)
+  const [assetsProjectId, setAssetsProjectId] = useState<string | null>(null)
   const [assetsTab, setAssetsTab] = useState<AssetsTab>('project')
 
   const [costLoading, setCostLoading] = useState(false)
@@ -33,10 +33,10 @@ export default function useOperationsData({ activeTab, notifyError }: UseOperati
   const [assetsLoading, setAssetsLoading] = useState(false)
   const [assetsPayload, setAssetsPayload] = useState<ProjectAssetsPayload | null>(null)
   const [assetsError, setAssetsError] = useState<string | null>(null)
-
-  const [globalAssetsLoading, setGlobalAssetsLoading] = useState(false)
-  const [globalAssetsPayload, setGlobalAssetsPayload] = useState<AssetHubOverview | null>(null)
-  const [globalAssetsError, setGlobalAssetsError] = useState<string | null>(null)
+  const globalAssetsLoading = useAssetHubStore((state) => state.loading)
+  const globalAssetsPayload = useAssetHubStore((state) => state.overview)
+  const globalAssetsError = useAssetHubStore((state) => state.error)
+  const loadGlobalAssets = useAssetHubStore((state) => state.loadOverview)
 
   useEffect(() => {
     notifyErrorRef.current = notifyError
@@ -49,10 +49,16 @@ export default function useOperationsData({ activeTab, notifyError }: UseOperati
   }, [fetchProjects])
 
   useEffect(() => {
-    if (!projectId && projects.length > 0) {
-      setProjectId(projects[0]?.id ?? null)
+    if (projects.length === 0) {
+      setCostProjectId(null)
+      setAssetsProjectId(null)
+      return
     }
-  }, [projectId, projects])
+
+    const firstProjectId = projects[0]?.id ?? null
+    setCostProjectId((prev) => (prev && projects.some((item) => item.id === prev) ? prev : firstProjectId))
+    setAssetsProjectId((prev) => (prev && projects.some((item) => item.id === prev) ? prev : firstProjectId))
+  }, [projects])
 
   const projectOptions = useMemo(
     () => projects.map((item) => ({ label: item.name, value: item.id })),
@@ -91,52 +97,48 @@ export default function useOperationsData({ activeTab, notifyError }: UseOperati
     }
   }, [projects])
 
-  const loadGlobalAssets = useCallback(async () => {
-    setGlobalAssetsLoading(true)
-    try {
-      const data = await getAssetHubOverview()
-      setGlobalAssetsPayload(data)
-      setGlobalAssetsError(null)
-    } catch (error) {
-      setGlobalAssetsPayload(null)
-      setGlobalAssetsError(getApiErrorMessage(error, '获取全局资产失败'))
-    } finally {
-      setGlobalAssetsLoading(false)
-    }
-  }, [])
+  useEffect(() => {
+    if (!costProjectId) return
+    void loadCosts(costProjectId)
+  }, [costProjectId, loadCosts])
 
   useEffect(() => {
-    if (!projectId) return
-    void loadCosts(projectId)
-    void loadProjectAssets(projectId)
-  }, [projectId, loadCosts, loadProjectAssets])
+    if (!assetsProjectId) return
+    void loadProjectAssets(assetsProjectId)
+  }, [assetsProjectId, loadProjectAssets])
 
   useEffect(() => {
-    void loadGlobalAssets()
+    loadGlobalAssets().catch((error) => {
+      notifyErrorRef.current(getApiErrorMessage(error, '获取全局资产失败'))
+    })
   }, [loadGlobalAssets])
 
   const refreshCurrent = useCallback(() => {
     if (activeTab === 'costs') {
-      if (projectId) {
-        void loadCosts(projectId)
+      if (costProjectId) {
+        void loadCosts(costProjectId)
       }
       return
     }
 
     if (assetsTab === 'project') {
-      if (projectId) {
-        void loadProjectAssets(projectId)
+      if (assetsProjectId) {
+        void loadProjectAssets(assetsProjectId)
       }
       return
     }
 
-    void loadGlobalAssets()
-  }, [activeTab, assetsTab, loadCosts, loadGlobalAssets, loadProjectAssets, projectId])
+    loadGlobalAssets({ force: true }).catch((error) => {
+      notifyErrorRef.current(getApiErrorMessage(error, '获取全局资产失败'))
+    })
+  }, [activeTab, assetsProjectId, assetsTab, costProjectId, loadCosts, loadGlobalAssets, loadProjectAssets])
 
   return {
     projectLoading,
-    projectId,
-    setProjectId,
+    costProjectId,
+    setCostProjectId,
+    assetsProjectId,
+    setAssetsProjectId,
     projectOptions,
     assetsTab,
     setAssetsTab,

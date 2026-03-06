@@ -1,3 +1,5 @@
+import type { PanelEffectiveBinding, ScriptScopedOverride } from './scriptAssets'
+
 export interface Panel {
   id: string
   project_id: string
@@ -12,7 +14,8 @@ export interface Panel {
   style_preset: string | null
   reference_image_url: string | null
   voice_id: string | null
-  voice_binding_json: Record<string, unknown> | null
+  asset_overrides: ScriptScopedOverride[]
+  effective_binding: PanelEffectiveBinding | null
   tts_text: string | null
   tts_audio_url: string | null
   video_url: string | null

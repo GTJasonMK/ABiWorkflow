@@ -7,11 +7,11 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.project_common import count_project_relations, get_project_or_404, to_project_response
+from app.api.project_common import count_project_relations, count_project_storyboard, get_project_or_404, to_project_response
 from app.api.projects_workflow import workflow_router
 from app.config import resolve_runtime_path, settings
 from app.database import get_db
-from app.models import Character, Project, Scene
+from app.models import Character, Episode, Panel, Project
 from app.project_status import (
     PROJECT_BUSY_STATUSES,
     PROJECT_RESET_TO_DRAFT_ON_SCRIPT_CHANGE,
@@ -43,7 +43,13 @@ async def create_project(body: ProjectCreate, db: AsyncSession = Depends(get_db)
     db.add(project)
     await db.commit()
     await db.refresh(project)
-    return ApiResponse(data=to_project_response(project, scene_count=0, character_count=0))
+    return ApiResponse(data=to_project_response(
+        project,
+        character_count=0,
+        episode_count=0,
+        panel_count=0,
+        generated_panel_count=0,
+    ))
 
 
 @router.get("", response_model=ApiResponse[PaginatedResponse[ProjectListItem]])
@@ -89,17 +95,36 @@ async def list_projects(
     result = await db.execute(stmt)
     projects = result.scalars().all()
 
-    # 批量查询场景数和角色数
+    # 批量查询分镜统计和角色数
     project_ids = [p.id for p in projects]
-    scene_count_map: dict[str, int] = {}
+    episode_count_map: dict[str, int] = {}
+    panel_count_map: dict[str, int] = {}
+    generated_panel_count_map: dict[str, int] = {}
     character_count_map: dict[str, int] = {}
     if project_ids:
-        scene_count_rows = await db.execute(
-            select(Scene.project_id, func.count(Scene.id))
-            .where(Scene.project_id.in_(project_ids))
-            .group_by(Scene.project_id)
+        episode_count_rows = await db.execute(
+            select(Episode.project_id, func.count(Episode.id))
+            .where(Episode.project_id.in_(project_ids))
+            .group_by(Episode.project_id)
         )
-        scene_count_map = {pid: cnt for pid, cnt in scene_count_rows.all()}
+        episode_count_map = {pid: cnt for pid, cnt in episode_count_rows.all()}
+
+        panel_count_rows = await db.execute(
+            select(Panel.project_id, func.count(Panel.id))
+            .where(Panel.project_id.in_(project_ids))
+            .group_by(Panel.project_id)
+        )
+        panel_count_map = {pid: cnt for pid, cnt in panel_count_rows.all()}
+
+        generated_panel_rows = await db.execute(
+            select(Panel.project_id, func.count(Panel.id))
+            .where(
+                Panel.project_id.in_(project_ids),
+                (Panel.video_url.is_not(None)) | (Panel.lipsync_video_url.is_not(None)),
+            )
+            .group_by(Panel.project_id)
+        )
+        generated_panel_count_map = {pid: cnt for pid, cnt in generated_panel_rows.all()}
 
         char_count_rows = await db.execute(
             select(Character.project_id, func.count(Character.id))
@@ -115,7 +140,9 @@ async def list_projects(
             name=p.name,
             description=p.description,
             status=p.status,
-            scene_count=scene_count_map.get(p.id, 0),
+            episode_count=episode_count_map.get(p.id, 0),
+            panel_count=panel_count_map.get(p.id, 0),
+            generated_panel_count=generated_panel_count_map.get(p.id, 0),
             character_count=character_count_map.get(p.id, 0),
             created_at=p.created_at,
             updated_at=p.updated_at,
@@ -130,8 +157,15 @@ async def list_projects(
 async def get_project(project_id: str, db: AsyncSession = Depends(get_db)):
     """获取项目详情"""
     project = await get_project_or_404(project_id, db)
-    scene_count, character_count = await count_project_relations(project.id, db)
-    return ApiResponse(data=to_project_response(project, scene_count=scene_count, character_count=character_count))
+    _, character_count = await count_project_relations(project.id, db)
+    episode_count, panel_count, generated_panel_count = await count_project_storyboard(project.id, db)
+    return ApiResponse(data=to_project_response(
+        project,
+        character_count=character_count,
+        episode_count=episode_count,
+        panel_count=panel_count,
+        generated_panel_count=generated_panel_count,
+    ))
 
 
 @router.put("/{project_id}", response_model=ApiResponse[ProjectResponse])
@@ -161,8 +195,15 @@ async def update_project(project_id: str, body: ProjectUpdate, db: AsyncSession 
 
     await db.commit()
     await db.refresh(project)
-    scene_count, character_count = await count_project_relations(project.id, db)
-    return ApiResponse(data=to_project_response(project, scene_count=scene_count, character_count=character_count))
+    _, character_count = await count_project_relations(project.id, db)
+    episode_count, panel_count, generated_panel_count = await count_project_storyboard(project.id, db)
+    return ApiResponse(data=to_project_response(
+        project,
+        character_count=character_count,
+        episode_count=episode_count,
+        panel_count=panel_count,
+        generated_panel_count=generated_panel_count,
+    ))
 
 
 @router.delete("/{project_id}", response_model=ApiResponse[None])

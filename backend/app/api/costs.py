@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.response_utils import isoformat_or_none
 from app.database import get_db
 from app.models import UsageCost
 from app.schemas.common import ApiResponse
@@ -32,7 +33,7 @@ def _cost_payload(item: UsageCost) -> dict[str, Any]:
         "total_cost": float(item.total_cost or 0.0),
         "currency": item.currency,
         "metadata": from_json_text(item.metadata_json, {}),
-        "created_at": item.created_at.isoformat() if item.created_at else None,
+        "created_at": isoformat_or_none(item.created_at),
     }
 
 

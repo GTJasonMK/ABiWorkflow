@@ -13,8 +13,10 @@ export interface AssetFolder {
 export interface GlobalVoice {
   id: string
   name: string
+  project_id: string | null
   provider: string
   voice_code: string
+  folder_id: string | null
   language: string | null
   gender: string | null
   sample_audio_url: string | null
@@ -28,6 +30,8 @@ export interface GlobalVoice {
 export interface GlobalCharacterAsset {
   id: string
   name: string
+  project_id: string | null
+  folder_id: string | null
   alias: string | null
   description: string | null
   prompt_template: string | null
@@ -42,6 +46,8 @@ export interface GlobalCharacterAsset {
 export interface GlobalLocationAsset {
   id: string
   name: string
+  project_id: string | null
+  folder_id: string | null
   description: string | null
   prompt_template: string | null
   reference_image_url: string | null

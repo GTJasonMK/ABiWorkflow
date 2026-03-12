@@ -1,8 +1,20 @@
 import axios from 'axios'
 import { getApiBaseUrl } from '../runtime'
 
+export const DEFAULT_API_TIMEOUT_MS = 60_000
+
+declare module 'axios' {
+  interface AxiosRequestConfig {
+    suppressErrorLog?: boolean
+  }
+
+  interface InternalAxiosRequestConfig {
+    suppressErrorLog?: boolean
+  }
+}
+
 const client = axios.create({
-  timeout: 30000,
+  timeout: DEFAULT_API_TIMEOUT_MS,
 })
 
 client.interceptors.request.use((config) => {
@@ -17,7 +29,9 @@ client.interceptors.response.use(
   (response) => response,
   (error) => {
     const message = error.response?.data?.detail ?? error.message ?? '请求失败'
-    console.error('[API 错误]', message)
+    if (!error.config?.suppressErrorLog) {
+      console.error('[API 错误]', message)
+    }
     return Promise.reject(error)
   },
 )

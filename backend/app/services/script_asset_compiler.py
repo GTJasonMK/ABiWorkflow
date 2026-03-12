@@ -23,7 +23,7 @@ from app.services.json_codec import from_json_text, to_json_text
 
 SUPPORTED_ASSET_TYPES = {"character", "location", "voice"}
 SUPPORTED_ENTITY_TYPES = {"character", "location", "speaker"}
-COMPILER_VERSION = "v1"
+COMPILER_VERSION = "v2"
 
 
 def _safe_json(raw: str | None) -> dict[str, Any]:
@@ -249,6 +249,55 @@ def _pick_primary(rows: list[dict[str, Any]], *, asset_type: str) -> dict[str, A
     return typed[0]
 
 
+def _effective_voice_payload_from_binding(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "voice_id": row.get("asset_id"),
+        "voice_name": row.get("asset_name"),
+        "provider": row.get("provider"),
+        "voice_code": row.get("voice_code"),
+        "style_prompt": row.get("style_prompt"),
+        "language": row.get("language"),
+        "gender": row.get("gender"),
+        "strategy": row.get("strategy") or {},
+        "source_layer": row.get("source_layer"),
+        "entity_id": row.get("entity_id"),
+        "entity_name": row.get("entity_name"),
+    }
+
+
+def _effective_voice_payload_from_character_default(
+    primary_character: dict[str, Any] | None,
+    voice_map: dict[str, GlobalVoice],
+    warnings: list[str],
+) -> dict[str, Any] | None:
+    if primary_character is None:
+        return None
+
+    voice_id = _clean_text(primary_character.get("default_voice_id"))
+    if not voice_id:
+        return None
+
+    voice = voice_map.get(voice_id)
+    if voice is None:
+        warnings.append(f"角色默认语音不存在: {voice_id}")
+        return None
+
+    return {
+        "voice_id": voice.id,
+        "voice_name": voice.name,
+        "provider": voice.provider,
+        "voice_code": voice.voice_code,
+        "style_prompt": voice.style_prompt,
+        "language": voice.language,
+        "gender": voice.gender,
+        "strategy": {},
+        "source_layer": "character_default",
+        "entity_id": None,
+        "entity_name": primary_character.get("entity_name"),
+        "role_tag": primary_character.get("role_tag"),
+    }
+
+
 async def compile_panel_effective_binding(panel: Panel, db: AsyncSession) -> dict[str, Any]:
     rows = await _build_effective_rows(panel, db)
 
@@ -262,9 +311,15 @@ async def compile_panel_effective_binding(panel: Panel, db: AsyncSession) -> dic
     locations = (await db.execute(
         select(GlobalLocation).where(GlobalLocation.id.in_(location_ids))
     )).scalars().all() if location_ids else []
+    fallback_voice_ids = [
+        str(item.default_voice_id)
+        for item in characters
+        if item.default_voice_id
+    ]
+    all_voice_ids = list(dict.fromkeys([*voice_ids, *fallback_voice_ids]))
     voices = (await db.execute(
-        select(GlobalVoice).where(GlobalVoice.id.in_(voice_ids))
-    )).scalars().all() if voice_ids else []
+        select(GlobalVoice).where(GlobalVoice.id.in_(all_voice_ids))
+    )).scalars().all() if all_voice_ids else []
 
     character_map = {item.id: item for item in characters}
     location_map = {item.id: item for item in locations}
@@ -288,6 +343,7 @@ async def compile_panel_effective_binding(panel: Panel, db: AsyncSession) -> dic
                 "prompt_template": record.prompt_template,
                 "description": record.description,
                 "reference_image_url": record.reference_image_url,
+                "default_voice_id": record.default_voice_id,
             })
             continue
         if asset_type == "location":
@@ -345,21 +401,9 @@ async def compile_panel_effective_binding(panel: Panel, db: AsyncSession) -> dic
         or None
     )
     effective_voice = (
-        {
-            "voice_id": primary_voice.get("asset_id"),
-            "voice_name": primary_voice.get("asset_name"),
-            "provider": primary_voice.get("provider"),
-            "voice_code": primary_voice.get("voice_code"),
-            "style_prompt": primary_voice.get("style_prompt"),
-            "language": primary_voice.get("language"),
-            "gender": primary_voice.get("gender"),
-            "strategy": primary_voice.get("strategy") or {},
-            "source_layer": primary_voice.get("source_layer"),
-            "entity_id": primary_voice.get("entity_id"),
-            "entity_name": primary_voice.get("entity_name"),
-        }
+        _effective_voice_payload_from_binding(primary_voice)
         if primary_voice
-        else None
+        else _effective_voice_payload_from_character_default(primary_character, voice_map, warnings)
     )
 
     compiled = {
@@ -438,7 +482,8 @@ async def get_panel_effective_binding(
     row = (await db.execute(
         select(PanelEffectiveBinding).where(PanelEffectiveBinding.panel_id == panel_id)
     )).scalar_one_or_none()
-    if row is None and auto_compile:
+    should_compile = row is None or row.compiler_version != COMPILER_VERSION
+    if should_compile and auto_compile:
         try:
             return await compile_panel_effective_binding_by_id(panel_id, db)
         except ValueError:

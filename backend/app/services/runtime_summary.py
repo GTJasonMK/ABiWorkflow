@@ -41,6 +41,7 @@ def build_runtime_summary(*, celery_worker_online: bool) -> dict[str, object]:
             "database_url": _mask_url_credentials(settings.database_url),
         },
         "llm": {
+            "provider": settings.llm_provider,
             "model": settings.llm_model,
             "base_url": settings.llm_base_url,
             "api_key_configured": llm_key_configured,
@@ -53,8 +54,6 @@ def build_runtime_summary(*, celery_worker_online: bool) -> dict[str, object]:
             "celery_worker_online": celery_worker_online,
             "queue_mode": queue_state.mode,
             "redis_available": queue_state.redis_available,
-            "fallback_active": queue_state.fallback_active,
-            "fallback_reason": queue_state.fallback_reason,
         },
         "video": {
             "provider": settings.video_provider,

@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { useParams, useNavigate, useSearchParams } from 'react-router-dom'
+import { useParams, useNavigate } from 'react-router-dom'
 import { Alert, Button, Card, Col, Empty, Row, Space, Spin, Tag, Typography, App as AntdApp } from 'antd'
 import { DownloadOutlined, PlayCircleOutlined, StopOutlined } from '@ant-design/icons'
 import { useWebSocket } from '../../hooks/useWebSocket'
+import { useProjectWorkspace } from '../../hooks/useProjectWorkspace'
 import { startComposition, getDownloadUrl, getComposition, getLatestComposition } from '../../api/composition'
 import { resolveAsyncResult } from '../../api/tasks'
-import { abortProjectTask, getProject } from '../../api/projects'
+import { abortProjectTask } from '../../api/projects'
 import { listEpisodePanels } from '../../api/panels'
 import { listEpisodes } from '../../api/episodes'
 import VideoTrimEditor, { type TimelineSegment } from '../../components/VideoTrimEditor'
@@ -15,7 +16,6 @@ import OptionsPanel from './OptionsPanel'
 import PageHeader from '../../components/PageHeader'
 import WorkflowSteps from '../../components/WorkflowSteps'
 import { getApiErrorMessage } from '../../utils/error'
-import { handleForceRecoverError } from '../../utils/forceRecover'
 import { saveUrlWithPicker } from '../../utils/download'
 import { buildWorkflowStepPath } from '../../utils/workflow'
 import type { Panel } from '../../types/panel'
@@ -24,11 +24,11 @@ import type { Episode } from '../../types/episode'
 const { Paragraph } = Typography
 
 export default function CompositionPreview() {
-  const { id: projectId } = useParams<{ id: string }>()
+  const { id: projectId, episodeId } = useParams<{ id: string; episodeId?: string }>()
   const navigate = useNavigate()
-  const [searchParams] = useSearchParams()
-  const episodeId = (searchParams.get('episodeId') || '').trim() || null
+  const scopedEpisodeId = (episodeId || '').trim() || null
   const { messages, connected, clearMessages } = useWebSocket(projectId)
+  const { workspace, refreshWorkspace } = useProjectWorkspace(projectId, '加载项目工作台失败')
   const [loading, setLoading] = useState(false)
   const [panels, setPanels] = useState<Panel[]>([])
   const [episodes, setEpisodes] = useState<Episode[]>([])
@@ -37,23 +37,24 @@ export default function CompositionPreview() {
   const [compositionDuration, setCompositionDuration] = useState(0)
   const [mediaUrl, setMediaUrl] = useState<string | null>(null)
   const [staleWarning, setStaleWarning] = useState(false)
-  const [projectUpdatedAt, setProjectUpdatedAt] = useState<string | null>(null)
   const { message, modal } = AntdApp.useApp()
   const composeLastMessage = useMemo(
     () => [...messages].reverse().find((item) => item.type.startsWith('compose_')) ?? null,
     [messages],
   )
   const selectedEpisode = useMemo(() => {
-    if (!episodeId) return null
-    return episodes.find((episode) => episode.id === episodeId) ?? null
-  }, [episodeId, episodes])
-  const contextEpisodeId = selectedEpisode?.id ?? null
+    if (!scopedEpisodeId) return null
+    return episodes.find((episode) => episode.id === scopedEpisodeId) ?? null
+  }, [episodes, scopedEpisodeId])
   const visiblePanels = panels
   const canCompose = useMemo(
     () => visiblePanels.length > 0 && visiblePanels.every((panel) => panel.status === 'completed' && Boolean(panel.lipsync_video_url || panel.video_url)),
     [visiblePanels],
   )
   const currentEpisodeTitle = selectedEpisode?.title ?? null
+  const projectUpdatedAt = workspace?.project.updated_at ?? null
+  const projectComposing = workspace?.project.status === 'composing'
+  const effectiveComposing = composing || projectComposing
   const timelineSegments = useMemo<TimelineSegment[]>(
     () => visiblePanels.map((panel) => ({
       id: panel.id,
@@ -75,11 +76,11 @@ export default function CompositionPreview() {
   })
 
   const fetchPanels = useCallback(async () => {
-    if (!projectId || !episodeId) return
+    if (!projectId || !scopedEpisodeId) return
     setLoading(true)
     try {
       const [rows, episodeRows] = await Promise.all([
-        listEpisodePanels(episodeId),
+        listEpisodePanels(scopedEpisodeId),
         listEpisodes(projectId),
       ])
       setPanels(rows)
@@ -89,7 +90,7 @@ export default function CompositionPreview() {
     } finally {
       setLoading(false)
     }
-  }, [episodeId, message, projectId])
+  }, [message, projectId, scopedEpisodeId])
 
   const loadLatestEpisodeComposition = useCallback(async (
     targetProjectId: string,
@@ -124,28 +125,22 @@ export default function CompositionPreview() {
   useEffect(() => {
     if (!projectId) return
     void fetchPanels()
-    getProject(projectId).then((project) => {
-      setProjectUpdatedAt(project.updated_at ?? null)
-      setComposing(project.status === 'composing')
-    }).catch(() => {
-      setComposing(false)
-    })
   }, [fetchPanels, projectId])
 
   useEffect(() => {
-    if (!projectId || !contextEpisodeId) {
+    if (!projectId || !scopedEpisodeId) {
       setCompositionId(null)
       setCompositionDuration(0)
       setMediaUrl(null)
       setStaleWarning(false)
       return
     }
-    void loadLatestEpisodeComposition(projectId, contextEpisodeId, projectUpdatedAt)
-  }, [contextEpisodeId, loadLatestEpisodeComposition, projectId, projectUpdatedAt])
+    void loadLatestEpisodeComposition(projectId, scopedEpisodeId, projectUpdatedAt)
+  }, [loadLatestEpisodeComposition, projectId, projectUpdatedAt, scopedEpisodeId])
 
-  const runCompose = async (forceRecover = false) => {
-    if (!projectId || !contextEpisodeId) {
-      message.warning('请先在剧本页选择分集后再执行合成')
+  const runCompose = async () => {
+    if (!projectId || !scopedEpisodeId) {
+      message.warning('分集参数缺失，请返回分集列表重新进入')
       return
     }
     if (!canCompose) {
@@ -155,7 +150,7 @@ export default function CompositionPreview() {
     setComposing(true)
     clearMessages()
     try {
-      const startResult = await startComposition(projectId, options, { forceRecover }, contextEpisodeId)
+      const startResult = await startComposition(projectId, options, {}, scopedEpisodeId)
       const result = await resolveAsyncResult(
         startResult as unknown as Record<string, unknown>,
         { timeoutMs: 20 * 60 * 1000 },
@@ -175,19 +170,16 @@ export default function CompositionPreview() {
       message.success('视频合成完成')
       setStaleWarning(false)
     } catch (error) {
-      handleForceRecoverError(error, forceRecover, modal, message, {
-        retryFn: () => runCompose(true),
-        errorFallback: '合成失败',
-      })
+      message.error(getApiErrorMessage(error, '合成失败'))
     } finally {
       setComposing(false)
-      // 无论成功或失败，都刷新分镜列表以同步后端最新状态
-      await fetchPanels()
+      // 无论成功或失败，都刷新分镜和工作台以同步后端最新状态
+      await Promise.all([fetchPanels(), refreshWorkspace()])
     }
   }
 
   const handleCompose = () => {
-    void runCompose(false)
+    void runCompose()
   }
 
   const handleDownloadComposition = async () => {
@@ -223,6 +215,7 @@ export default function CompositionPreview() {
             message.info(result.message)
           }
           setComposing(false)
+          await refreshWorkspace()
         } catch (err) {
           message.error(getApiErrorMessage(err, '取消失败'))
         }
@@ -238,46 +231,23 @@ export default function CompositionPreview() {
     )
   }
 
-  if (!episodeId) {
+  if (!projectId || !scopedEpisodeId) {
     return (
       <section className="np-page">
         <PageHeader
           kicker="成片合成"
           title="合成预览"
-          subtitle="当前流程仅支持单集操作，请先选择分集。"
+          subtitle="分集参数缺失，请返回分集列表重新进入。"
           onBack={() => {
             if (!projectId) return
             navigate(`/projects/${projectId}/script`)
           }}
           backLabel="返回剧本分集"
-          navigation={<WorkflowSteps episodeIdOverride={null} />}
+          navigation={<WorkflowSteps />}
         />
         <div className="np-page-scroll">
           <Card size="small" className="np-panel-card">
-            <Empty description="缺少分集上下文，请从剧本页选择分集后进入本页面。" />
-          </Card>
-        </div>
-      </section>
-    )
-  }
-
-  if (!selectedEpisode) {
-    return (
-      <section className="np-page">
-        <PageHeader
-          kicker="成片合成"
-          title="合成预览"
-          subtitle="分集上下文无效，请返回剧本页重新选择分集。"
-          onBack={() => {
-            if (!projectId) return
-            navigate(`/projects/${projectId}/script`)
-          }}
-          backLabel="返回剧本分集"
-          navigation={<WorkflowSteps episodeIdOverride={null} />}
-        />
-        <div className="np-page-scroll">
-          <Card size="small" className="np-panel-card">
-            <Empty description="当前分集不存在或已删除，请从剧本页重新进入合成预览。" />
+            <Empty description="分集参数缺失，请从分集列表重新进入合成预览。" />
           </Card>
         </div>
       </section>
@@ -291,23 +261,23 @@ export default function CompositionPreview() {
         title="合成预览"
         subtitle="设置转场与字幕策略，生成最终成片并下载导出。"
         onBack={() => {
-          if (!projectId) return
-          navigate(buildWorkflowStepPath(projectId, 'generate', contextEpisodeId))
+          if (!projectId || !scopedEpisodeId) return
+          navigate(buildWorkflowStepPath(projectId, 'video', scopedEpisodeId))
         }}
         backLabel="返回上一步"
-        navigation={<WorkflowSteps episodeIdOverride={contextEpisodeId} />}
+        navigation={<WorkflowSteps />}
         actions={(
           <Space>
-            <Button
-              type="primary"
-              icon={<PlayCircleOutlined />}
-              onClick={handleCompose}
-              disabled={!canCompose || composing}
-              loading={composing}
-            >
-              {composing ? '合成中...' : '开始合成'}
+              <Button
+                type="primary"
+                icon={<PlayCircleOutlined />}
+                onClick={handleCompose}
+                disabled={!canCompose || effectiveComposing}
+                loading={effectiveComposing}
+              >
+              {effectiveComposing ? '合成中...' : '开始合成'}
             </Button>
-            {composing && (
+            {effectiveComposing && (
               <Button
                 icon={<StopOutlined />}
                 onClick={handleAbort}
@@ -331,7 +301,7 @@ export default function CompositionPreview() {
       />
 
       <div className="np-page-scroll">
-        {staleWarning && !composing && (
+        {staleWarning && !effectiveComposing && (
           <Alert
             type="warning"
             showIcon
@@ -378,12 +348,12 @@ export default function CompositionPreview() {
             </Card>
 
             {/* 进度条 */}
-            {(composing || composeLastMessage) && (
+            {(effectiveComposing || composeLastMessage) && (
               <Card size="small" className="np-panel-card">
                 <ProgressBar
                   lastMessage={composeLastMessage}
                   connected={connected}
-                  active={composing}
+                  active={effectiveComposing}
                   activeText="正在合成视频..."
                 />
               </Card>

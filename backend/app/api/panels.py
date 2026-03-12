@@ -4,6 +4,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Callable, Literal
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import func, select
@@ -12,20 +13,26 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.api.project_common import get_episode_or_404, get_project_or_404
-from app.api.project_invalidation import invalidate_panel_generation_outputs
+from app.api.project_invalidation import invalidate_panel_runtime_outputs
 from app.api.response_utils import isoformat_or_empty, json_dict_or_none
 from app.database import get_db
 from app.models import Episode, GlobalVoice, Panel, PanelAssetOverride, Project, ScriptEntity, ScriptEntityAssetBinding
 from app.panel_status import (
     PANEL_STATUS_COMPLETED,
     PANEL_STATUS_FAILED,
+    PANEL_STATUS_PENDING,
     PANEL_STATUS_PROCESSING,
 )
 from app.project_status import PROJECT_BUSY_STATUSES
 from app.schemas.common import ApiResponse
 from app.services.costing import record_usage_cost
+from app.services.episode_workflow import get_episode_provider_key, merge_episode_provider_payload
 from app.services.provider_gateway import query_provider_task_status, submit_provider_task
-from app.services.script_asset_compiler import compile_panel_effective_binding, get_panel_effective_binding
+from app.services.script_asset_compiler import (
+    COMPILER_VERSION,
+    compile_panel_effective_binding,
+    get_panel_effective_binding,
+)
 from app.services.task_records import (
     create_task_record,
     get_task_record_by_source_id,
@@ -61,7 +68,7 @@ class PanelCreate(BaseModel):
     script_text: str | None = None
     visual_prompt: str | None = None
     negative_prompt: str | None = None
-    duration_seconds: float = 5.0
+    duration_seconds: float | None = None
 
 
 class PanelUpdate(BaseModel):
@@ -87,11 +94,22 @@ class PanelReorderRequest(BaseModel):
     panel_ids: list[str]
 
 
+class EpisodePanelsGenerateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    overwrite: bool = Field(default=True, description="是否覆盖当前分集已有分镜")
+
+
 class ProviderSubmitRequest(BaseModel):
-    provider_key: str
+    provider_key: str | None = None
     payload: dict[str, Any] = Field(default_factory=dict)
     unit_price: float = 0.0
     model_name: str | None = None
+
+
+class ProviderBatchSubmitRequest(ProviderSubmitRequest):
+    force: bool = Field(default=False, description="是否强制覆盖已生成的结果")
+    panel_ids: list[str] | None = Field(default=None, description="可选：仅提交指定 panel_ids")
 
 
 class ProviderApplyRequest(BaseModel):
@@ -131,17 +149,17 @@ class PanelResponse(BaseModel):
     tts_audio_url: str | None
     video_url: str | None
     lipsync_video_url: str | None
-    provider_task_id: str | None
+    video_provider_task_id: str | None
+    tts_provider_task_id: str | None
+    lipsync_provider_task_id: str | None
+    video_status: str
+    tts_status: str
+    lipsync_status: str
     status: str
     error_message: str | None
     created_at: str
     updated_at: str
 
-
-
-def _normalize_role_tag(value: str | None) -> str | None:
-    text = (value or "").strip()
-    return text or None
 
 
 def _sorted_voice_overrides(panel: Panel) -> list[PanelAssetOverride]:
@@ -163,7 +181,7 @@ async def _resolve_speaker_entity_id(
     voice_id: str,
     explicit_entity_id: str | None,
 ) -> str:
-    entity_id = (explicit_entity_id or "").strip() or None
+    entity_id = _optional_text(explicit_entity_id)
     if entity_id:
         row = (await db.execute(
             select(ScriptEntity).where(
@@ -226,7 +244,7 @@ async def _replace_panel_voice_override(
         if item.asset_type == "voice":
             await db.delete(item)
 
-    normalized_voice_id = (voice_id or "").strip() or None
+    normalized_voice_id = _optional_text(voice_id)
     if normalized_voice_id:
         target_entity_id = await _resolve_speaker_entity_id(
             panel,
@@ -243,7 +261,7 @@ async def _replace_panel_voice_override(
             asset_type="voice",
             asset_id=normalized_voice_id,
             asset_name=voice_name,
-            role_tag=_normalize_role_tag(role_tag),
+            role_tag=_optional_text(role_tag),
             priority=0,
             is_primary=True,
             strategy_json=to_json_text(strategy) if strategy else None,
@@ -322,7 +340,12 @@ def _to_panel_response(panel: Panel) -> PanelResponse:
         tts_audio_url=panel.tts_audio_url,
         video_url=panel.video_url,
         lipsync_video_url=panel.lipsync_video_url,
-        provider_task_id=panel.provider_task_id,
+        video_provider_task_id=panel.video_provider_task_id,
+        tts_provider_task_id=panel.tts_provider_task_id,
+        lipsync_provider_task_id=panel.lipsync_provider_task_id,
+        video_status=panel.video_status,
+        tts_status=panel.tts_status,
+        lipsync_status=panel.lipsync_status,
         status=panel.status,
         error_message=panel.error_message,
         created_at=isoformat_or_empty(panel.created_at),
@@ -335,6 +358,22 @@ def _panel_detail_options() -> tuple[Any, Any]:
         selectinload(Panel.asset_overrides),
         selectinload(Panel.effective_binding),
     )
+
+
+def _panel_effective_binding_is_stale(panel: Panel) -> bool:
+    panel_state = sa_inspect(panel)
+    if "effective_binding" in panel_state.unloaded:
+        return True
+    row = panel.effective_binding
+    return row is None or row.compiler_version != COMPILER_VERSION
+
+
+async def _refresh_panel_effective_binding_if_needed(panel: Panel, db: AsyncSession) -> Panel:
+    if not _panel_effective_binding_is_stale(panel):
+        return panel
+    await compile_panel_effective_binding(panel, db)
+    await db.commit()
+    return await _get_panel_with_details_or_404(panel.id, db)
 
 
 async def _list_panels_with_details(
@@ -364,6 +403,24 @@ async def _get_panel_with_details_or_404(panel_id: str, db: AsyncSession) -> Pan
     return panel
 
 
+async def _refresh_panel_list_effective_bindings_if_needed(
+    panels: list[Panel],
+    db: AsyncSession,
+    *,
+    project_id: str | None = None,
+    episode_id: str | None = None,
+) -> list[Panel]:
+    stale_ids = {panel.id for panel in panels if _panel_effective_binding_is_stale(panel)}
+    if not stale_ids:
+        return panels
+
+    for panel in panels:
+        if panel.id in stale_ids:
+            await compile_panel_effective_binding(panel, db)
+    await db.commit()
+    return await _list_panels_with_details(db, project_id=project_id, episode_id=episode_id)
+
+
 async def _ensure_project_editable(project_id: str, db: AsyncSession, action: str) -> Project:
     project = await get_project_or_404(project_id, db)
     if project.status in PROJECT_BUSY_STATUSES:
@@ -374,6 +431,7 @@ async def _ensure_project_editable(project_id: str, db: AsyncSession, action: st
 @router.get("/projects/{project_id}/panels", response_model=ApiResponse[list[PanelResponse]])
 async def list_project_panels(project_id: str, db: AsyncSession = Depends(get_db)):
     panels = await _list_panels_with_details(db, project_id=project_id)
+    panels = await _refresh_panel_list_effective_bindings_if_needed(panels, db, project_id=project_id)
     return ApiResponse(data=[_to_panel_response(item) for item in panels])
 
 
@@ -381,7 +439,25 @@ async def list_project_panels(project_id: str, db: AsyncSession = Depends(get_db
 async def list_panels(episode_id: str, db: AsyncSession = Depends(get_db)):
     await get_episode_or_404(episode_id, db)
     panels = await _list_panels_with_details(db, episode_id=episode_id)
+    panels = await _refresh_panel_list_effective_bindings_if_needed(panels, db, episode_id=episode_id)
     return ApiResponse(data=[_to_panel_response(item) for item in panels])
+
+
+@router.post("/episodes/{episode_id}/panels/video/submit-batch", response_model=ApiResponse[dict])
+async def submit_episode_panels_video_batch(
+    episode_id: str,
+    body: ProviderBatchSubmitRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """批量提交分集分镜的视频生成任务（Provider 模式）。"""
+    return ApiResponse(data=await _submit_episode_panels_provider_batch(
+        db,
+        episode_id=episode_id,
+        body=body,
+        task_type="video",
+        usage_type="panel_video_generate",
+        payload_builder=_build_panel_video_payload,
+    ))
 
 
 @router.post("/episodes/{episode_id}/panels", response_model=ApiResponse[PanelResponse])
@@ -391,6 +467,31 @@ async def create_panel(episode_id: str, body: PanelCreate, db: AsyncSession = De
     title = body.title.strip()
     if not title:
         raise HTTPException(status_code=400, detail="分镜标题不能为空")
+
+    duration_seconds: float
+    provider_key = _optional_text(getattr(episode, "video_provider_key", None))
+    if provider_key:
+        try:
+            from app.services.provider_constraints import resolve_video_duration_constraints
+
+            constraints = await resolve_video_duration_constraints(db, provider_key=provider_key)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        raw_duration = body.duration_seconds
+        if raw_duration is None:
+            duration_seconds = float(constraints.allowed_seconds[0])
+        else:
+            requested = int(round(float(raw_duration)))
+            if requested not in constraints.allowed_seconds:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"分镜时长必须为 {constraints.allowed_seconds_text()} 秒之一",
+                )
+            duration_seconds = float(requested)
+    else:
+        raw_duration = float(body.duration_seconds if body.duration_seconds is not None else 5.0)
+        duration_seconds = max(0.1, raw_duration)
 
     max_order = (await db.execute(
         select(func.coalesce(func.max(Panel.panel_order), -1)).where(Panel.episode_id == episode_id)
@@ -403,17 +504,144 @@ async def create_panel(episode_id: str, body: PanelCreate, db: AsyncSession = De
         script_text=(body.script_text or "").strip() or None,
         visual_prompt=(body.visual_prompt or "").strip() or None,
         negative_prompt=(body.negative_prompt or "").strip() or None,
-        duration_seconds=max(0.1, float(body.duration_seconds)),
+        duration_seconds=duration_seconds,
     )
     db.add(panel)
     await db.commit()
     await db.refresh(panel)
-    from app.services.script_asset_compiler import compile_panel_effective_binding
 
     await compile_panel_effective_binding(panel, db)
     await db.commit()
     panel = await _get_panel_with_details_or_404(panel.id, db)
     return ApiResponse(data=_to_panel_response(panel))
+
+
+@router.post("/episodes/{episode_id}/panels/generate", response_model=ApiResponse[list[PanelResponse]])
+async def generate_episode_panels(
+    episode_id: str,
+    body: EpisodePanelsGenerateRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """将分集剧本文案解析为分镜列表（LLM 生成）。"""
+    episode = await get_episode_or_404(episode_id, db)
+    await _ensure_project_editable(episode.project_id, db, "生成分镜")
+
+    script_text = (episode.script_text or "").strip()
+    if not script_text:
+        raise HTTPException(status_code=400, detail="当前分集剧本为空，无法生成分镜")
+
+    provider_key = _optional_text(getattr(episode, "video_provider_key", None))
+    if not provider_key:
+        raise HTTPException(
+            status_code=400,
+            detail="当前分集未配置视频 Provider，请先在剧本编辑页“编辑本集”中设置 video_provider_key",
+        )
+
+    existing_count = int((await db.execute(
+        select(func.count(Panel.id)).where(Panel.episode_id == episode_id)
+    )).scalar() or 0)
+    if existing_count > 0 and not body.overwrite:
+        raise HTTPException(status_code=409, detail="当前分集已存在分镜，请使用 overwrite 覆盖生成")
+
+    llm = None
+    try:
+        from app.llm.factory import create_llm_adapter
+        from app.services.provider_constraints import resolve_video_duration_constraints
+        from app.services.script_asset_compiler import compile_panel_effective_binding
+        from app.services.script_parser import ScriptParserService, normalize_panel_duration
+
+        llm = create_llm_adapter()
+        try:
+            constraints = await resolve_video_duration_constraints(db, provider_key=provider_key)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        parser = ScriptParserService(llm)
+        analysis = await parser.analyze_narrative(
+            script_text,
+            max_scene_seconds=constraints.max_scene_seconds,
+            allowed_scene_seconds=constraints.allowed_seconds,
+        )
+        prompts = await parser.generate_panel_prompts(
+            analysis,
+            max_scene_seconds=constraints.max_scene_seconds,
+            allowed_scene_seconds=constraints.allowed_seconds,
+        )
+        if not prompts:
+            raise RuntimeError("未生成任何分镜提示词，请检查剧本内容")
+        if len(prompts) != len(analysis.scenes):
+            raise RuntimeError(f"生成提示词数量({len(prompts)})与叙事片段数({len(analysis.scenes)})不一致")
+
+        if existing_count > 0 and body.overwrite:
+            old_panels = (await db.execute(
+                select(Panel).where(Panel.episode_id == episode_id)
+            )).scalars().all()
+            for panel in old_panels:
+                await db.delete(panel)
+            await db.flush()
+
+        max_duration = float(constraints.max_scene_seconds)
+        new_panels: list[Panel] = []
+
+        for index, prompt in enumerate(prompts):
+            narrative = analysis.scenes[index] if index < len(analysis.scenes) else None
+            title = (prompt.title or "").strip()
+            if not title and narrative is not None:
+                title = (narrative.title or "").strip()
+            if not title:
+                title = f"分镜 {index + 1}"
+
+            visual_prompt = (prompt.video_prompt or "").strip()
+            if not visual_prompt:
+                raise RuntimeError(f"第 {index + 1} 个分镜缺少有效视频提示词")
+
+            duration_seconds = normalize_panel_duration(
+                float(prompt.duration_seconds or constraints.allowed_seconds[0]),
+                max_duration=max_duration,
+                allowed_seconds=constraints.allowed_seconds,
+            )
+            camera_hint = (prompt.camera_movement or "").strip() or None
+            if camera_hint:
+                camera_hint = camera_hint[:200]
+            style_preset = (prompt.style_keywords or "").strip() or None
+            if style_preset:
+                style_preset = style_preset[:100]
+            negative_prompt = (prompt.negative_prompt or "").strip() or None
+            script_segment = (getattr(narrative, "narrative", "") if narrative else "") or ""
+            tts_text = (getattr(narrative, "dialogue", "") if narrative else "") or ""
+
+            panel = Panel(
+                project_id=episode.project_id,
+                episode_id=episode_id,
+                panel_order=index,
+                title=title,
+                script_text=script_segment.strip() or None,
+                visual_prompt=visual_prompt,
+                negative_prompt=negative_prompt,
+                camera_hint=camera_hint,
+                duration_seconds=duration_seconds,
+                style_preset=style_preset,
+                tts_text=tts_text.strip() or None,
+                status=PANEL_STATUS_PENDING,
+            )
+            db.add(panel)
+            new_panels.append(panel)
+
+        await db.flush()
+        for panel in new_panels:
+            await compile_panel_effective_binding(panel, db)
+
+        await db.commit()
+
+        panels = await _list_panels_with_details(db, episode_id=episode_id)
+        return ApiResponse(data=[_to_panel_response(item) for item in panels])
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001 - 统一包装为 API 错误，便于前端展示
+        await db.rollback()
+        raise HTTPException(status_code=500, detail=f"生成分镜失败: {exc}") from exc
+    finally:
+        if llm is not None:
+            await llm.close()
 
 
 @router.put("/episodes/{episode_id}/panels/reorder", response_model=ApiResponse[None])
@@ -436,6 +664,7 @@ async def reorder_panels(episode_id: str, body: PanelReorderRequest, db: AsyncSe
 @router.get("/panels/{panel_id}", response_model=ApiResponse[PanelResponse])
 async def get_panel(panel_id: str, db: AsyncSession = Depends(get_db)):
     panel = await _get_panel_with_details_or_404(panel_id, db)
+    panel = await _refresh_panel_effective_binding_if_needed(panel, db)
     return ApiResponse(data=_to_panel_response(panel))
 
 
@@ -475,6 +704,24 @@ async def update_panel(panel_id: str, body: PanelUpdate, db: AsyncSession = Depe
             continue
         if key == "duration_seconds" and value is not None:
             normalized_duration = max(0.1, float(value))
+            episode = await get_episode_or_404(panel.episode_id, db)
+            provider_key = _optional_text(getattr(episode, "video_provider_key", None))
+            if provider_key:
+                try:
+                    from app.services.provider_constraints import resolve_video_duration_constraints
+
+                    constraints = await resolve_video_duration_constraints(db, provider_key=provider_key)
+                except ValueError as exc:
+                    raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+                requested = int(round(normalized_duration))
+                if requested not in constraints.allowed_seconds:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"分镜时长必须为 {constraints.allowed_seconds_text()} 秒之一",
+                    )
+                normalized_duration = float(requested)
+
             if float(panel.duration_seconds or 0.0) != normalized_duration:
                 changed_fields.add("duration_seconds")
             panel.duration_seconds = normalized_duration
@@ -493,8 +740,22 @@ async def update_panel(panel_id: str, body: PanelUpdate, db: AsyncSession = Depe
         "reference_image_url",
         "title",
     }
-    if changed_fields & generation_affecting_fields:
-        await invalidate_panel_generation_outputs(db, project=project, panel=panel)
+    voice_output_affecting_fields = {
+        "tts_text",
+        "voice_id",
+        "script_text",
+        "title",
+    }
+    clear_generation_outputs = bool(changed_fields & generation_affecting_fields)
+    clear_voice_outputs = bool(changed_fields & voice_output_affecting_fields)
+    if clear_generation_outputs or clear_voice_outputs:
+        await invalidate_panel_runtime_outputs(
+            db,
+            project=project,
+            panel=panel,
+            clear_generation=clear_generation_outputs,
+            clear_voice=clear_voice_outputs,
+        )
 
     if "status" in changed_fields and updates.get("status") == PANEL_STATUS_COMPLETED:
         # 手动回写完成态时，不保留历史错误信息。
@@ -528,6 +789,109 @@ async def delete_panel(panel_id: str, db: AsyncSession = Depends(get_db)):
     return ApiResponse(data=None)
 
 
+def _provider_phase_from_status(raw_status: str | None) -> str:
+    value = str(raw_status or "").strip().lower()
+    if value in {"completed", "success", "succeeded"}:
+        return "succeeded"
+    if value in {"failed", "cancelled", "error"}:
+        return "failed"
+    if value in {"pending", "submitted", "queued"}:
+        return "queued"
+    if value in {"running", "processing", "in_progress"}:
+        return "running"
+    return "idle"
+
+
+def _set_panel_task_phase(panel: Panel, task_type: str, phase: str) -> None:
+    if task_type == "video":
+        panel.video_status = phase
+        return
+    if task_type == "tts":
+        panel.tts_status = phase
+        return
+    if task_type == "lipsync":
+        panel.lipsync_status = phase
+        return
+    raise ValueError(f"未知 task_type: {task_type}")
+
+
+def _refresh_panel_rollup_status(panel: Panel) -> None:
+    if panel.video_status in {"failed", "running", "queued"}:
+        panel.status = PANEL_STATUS_FAILED if panel.video_status == "failed" else PANEL_STATUS_PROCESSING
+        return
+    if panel.lipsync_status in {"failed", "running", "queued"}:
+        panel.status = PANEL_STATUS_FAILED if panel.lipsync_status == "failed" else PANEL_STATUS_PROCESSING
+        return
+    if panel.video_url or panel.lipsync_video_url or panel.video_status == "succeeded":
+        panel.status = PANEL_STATUS_COMPLETED
+        return
+    panel.status = PANEL_STATUS_PENDING
+
+
+def _provider_label(task_type: str) -> str:
+    return {
+        "video": "视频",
+        "tts": "语音",
+        "lipsync": "口型同步",
+    }.get(task_type, task_type)
+
+
+async def _resolve_provider_submit_request(
+    db: AsyncSession,
+    *,
+    episode: Episode,
+    task_type: str,
+    body: ProviderSubmitRequest,
+) -> ProviderSubmitRequest:
+    provider_key = (body.provider_key or "").strip() or get_episode_provider_key(episode, task_type)
+    if not provider_key:
+        raise HTTPException(status_code=400, detail=f"当前分集未配置{_provider_label(task_type)} Provider")
+    return ProviderSubmitRequest(
+        provider_key=provider_key,
+        payload=merge_episode_provider_payload(episode, task_type=task_type, extra_payload=body.payload),
+        unit_price=float(body.unit_price or 0.0),
+        model_name=body.model_name,
+    )
+
+
+async def _resolve_provider_status_key(
+    db: AsyncSession,
+    *,
+    panel: Panel,
+    task_type: str,
+    provider_key: str | None,
+) -> str:
+    episode = await get_episode_or_404(panel.episode_id, db)
+    resolved_provider_key = (provider_key or "").strip() or get_episode_provider_key(episode, task_type)
+    if not resolved_provider_key:
+        raise HTTPException(status_code=400, detail=f"当前分集未配置{_provider_label(task_type)} Provider")
+    return resolved_provider_key
+
+
+def _reset_panel_outputs_for_provider_submit(panel: Panel, task_type: str) -> None:
+    if task_type == "video":
+        panel.video_url = None
+        panel.lipsync_video_url = None
+        panel.lipsync_provider_task_id = None
+        panel.video_status = "running"
+        panel.lipsync_status = "idle"
+        panel.error_message = None
+        _refresh_panel_rollup_status(panel)
+        return
+    if task_type == "tts":
+        panel.tts_audio_url = None
+        panel.lipsync_video_url = None
+        panel.lipsync_provider_task_id = None
+        panel.tts_status = "running"
+        panel.lipsync_status = "idle"
+        _refresh_panel_rollup_status(panel)
+        return
+    if task_type == "lipsync":
+        panel.lipsync_video_url = None
+        panel.lipsync_status = "running"
+        _refresh_panel_rollup_status(panel)
+
+
 async def _submit_panel_provider_task(
     db: AsyncSession,
     *,
@@ -537,11 +901,42 @@ async def _submit_panel_provider_task(
     body: ProviderSubmitRequest,
     payload: dict[str, Any],
 ) -> dict[str, Any]:
-    submitted = await submit_provider_task(db, provider_key=body.provider_key, payload=payload)
+    try:
+        submitted = await submit_provider_task(db, provider_key=body.provider_key or "", payload=payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except httpx.HTTPStatusError as exc:
+        snippet = ""
+        try:
+            snippet = (exc.response.text or "")[:800].replace("\n", " ").strip()
+        except Exception:  # noqa: BLE001
+            snippet = ""
+        detail = f"提交 Provider 任务失败: 上游返回 {exc.response.status_code}"
+        if snippet:
+            detail = f"{detail} - {snippet}"
+        raise HTTPException(status_code=502, detail=detail) from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"提交 Provider 任务失败: {exc}") from exc
     provider_task_id = submitted["task_id"]
-    panel.provider_task_id = provider_task_id
-    panel.status = PANEL_STATUS_PROCESSING
-    panel.error_message = None
+    unit_price = max(0.0, float(body.unit_price))
+    task_payload = {
+        "provider_key": body.provider_key,
+        "request": dict(payload),
+        "usage_type": usage_type,
+        "model_name": body.model_name,
+        "unit_price": unit_price,
+    }
+
+    _reset_panel_outputs_for_provider_submit(panel, task_type)
+    _set_panel_provider_task_id(panel, task_type, provider_task_id)
+    _set_panel_task_phase(panel, task_type, _provider_phase_from_status(submitted.get("status")))
+    if (
+        task_type in {"video", "lipsync"}
+        and panel.error_message
+        and getattr(panel, f"{task_type}_status", "") != "failed"
+    ):
+        panel.error_message = None
+    _refresh_panel_rollup_status(panel)
 
     record = await create_task_record(
         db,
@@ -555,7 +950,7 @@ async def _submit_panel_provider_task(
         status=TASK_RECORD_STATUS_RUNNING,
         progress_percent=0.0,
         message=f"{task_type} 已提交到 {body.provider_key}",
-        payload={"provider_key": body.provider_key, "request": payload},
+        payload=task_payload,
     )
     await record_usage_cost(
         db,
@@ -565,14 +960,44 @@ async def _submit_panel_provider_task(
         usage_type=usage_type,
         quantity=1.0,
         unit="request",
-        unit_price=max(0.0, float(body.unit_price)),
+        unit_price=unit_price,
         project_id=panel.project_id,
         episode_id=panel.episode_id,
         panel_id=panel.id,
         task_id=record.id,
     )
+
+    immediate_status = str(submitted.get("status") or "").strip().lower()
+    immediate_result_url = str(submitted.get("result_url") or "").strip() or None
+    if immediate_status == "completed" and immediate_result_url:
+        target_field = {
+            "video": "video_url",
+            "tts": "tts_audio_url",
+            "lipsync": "lipsync_video_url",
+        }.get(task_type)
+        if not target_field:
+            raise HTTPException(status_code=500, detail=f"未知 task_type: {task_type}")
+
+        setattr(panel, target_field, immediate_result_url)
+        _set_panel_task_phase(panel, task_type, "succeeded")
+        panel.error_message = None
+        _refresh_panel_rollup_status(panel)
+
+        await update_task_record(
+            db,
+            task=record,
+            status=TASK_RECORD_STATUS_COMPLETED,
+            progress_percent=100.0,
+            message=f"{task_type} 已完成（同步返回结果）",
+            result={
+                "result_url": immediate_result_url,
+                "provider_submit": submitted,
+            },
+            event_type="provider_submitted",
+        )
     await db.commit()
     await db.refresh(panel)
+    await db.refresh(record)
     return {
         "panel": _to_panel_response(panel).model_dump(),
         "task": serialize_task_record(record),
@@ -583,29 +1008,78 @@ async def _submit_panel_provider_task(
 def _map_provider_status_to_task_status(provider_status: str) -> str:
     return {
         "pending": TASK_RECORD_STATUS_RUNNING,
+        "queued": TASK_RECORD_STATUS_RUNNING,
+        "submitted": TASK_RECORD_STATUS_RUNNING,
         "running": TASK_RECORD_STATUS_RUNNING,
         "completed": TASK_RECORD_STATUS_COMPLETED,
+        "success": TASK_RECORD_STATUS_COMPLETED,
+        "succeeded": TASK_RECORD_STATUS_COMPLETED,
         "failed": TASK_RECORD_STATUS_FAILED,
         "cancelled": TASK_RECORD_STATUS_FAILED,
     }.get(provider_status, TASK_RECORD_STATUS_RUNNING)
+
+
+def _panel_provider_task_field(task_type: str) -> str:
+    return {
+        "video": "video_provider_task_id",
+        "tts": "tts_provider_task_id",
+        "lipsync": "lipsync_provider_task_id",
+    }[task_type]
+
+
+def _panel_provider_task_id(panel: Panel, task_type: str) -> str | None:
+    return getattr(panel, _panel_provider_task_field(task_type))
+
+
+def _set_panel_provider_task_id(panel: Panel, task_type: str, task_id: str) -> None:
+    setattr(panel, _panel_provider_task_field(task_type), task_id)
+
+
+def _panel_provider_output_url(panel: Panel, task_type: str) -> str | None:
+    if task_type == "video":
+        return panel.video_url
+    if task_type == "tts":
+        return panel.tts_audio_url
+    if task_type == "lipsync":
+        return panel.lipsync_video_url
+    raise ValueError(f"未知 task_type: {task_type}")
 
 
 async def _query_and_sync_panel_provider_status(
     db: AsyncSession,
     *,
     panel: Panel,
+    task_type: str,
     provider_key: str,
     missing_task_detail: str,
 ) -> dict[str, Any]:
-    if not panel.provider_task_id:
+    provider_task_id = _panel_provider_task_id(panel, task_type)
+    if not provider_task_id:
         raise HTTPException(status_code=400, detail=missing_task_detail)
 
-    status_data = await query_provider_task_status(
-        db,
-        provider_key=provider_key,
-        task_id=panel.provider_task_id,
-    )
-    task = await get_task_record_by_source_id(db, panel.provider_task_id)
+    existing_output = _panel_provider_output_url(panel, task_type)
+    if existing_output:
+        return {
+            "provider_key": provider_key,
+            "task_id": str(provider_task_id),
+            "status": "completed",
+            "progress_percent": 100.0,
+            "result_url": existing_output,
+            "error_message": None,
+            "raw": {"source": "panel"},
+        }
+
+    try:
+        status_data = await query_provider_task_status(
+            db,
+            provider_key=provider_key,
+            task_id=provider_task_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"查询 Provider 状态失败: {exc}") from exc
+    task = await get_task_record_by_source_id(db, provider_task_id)
     if task:
         await update_task_record(
             db,
@@ -616,30 +1090,74 @@ async def _query_and_sync_panel_provider_status(
             result={"provider_status": status_data},
             event_type="provider_status",
         )
+    _set_panel_task_phase(panel, task_type, _provider_phase_from_status(status_data.get("status")))
+    if status_data["status"] in {"failed", "cancelled"}:
+        panel.error_message = status_data.get("error_message")
+    elif task_type in {"video", "lipsync"} and status_data["status"] == "completed":
+        panel.error_message = None
+    _refresh_panel_rollup_status(panel)
     return status_data
 
 
 def _apply_video_provider_status(panel: Panel, status_data: dict[str, Any]) -> None:
-    if status_data["status"] == "completed":
-        panel.status = PANEL_STATUS_COMPLETED
-        return
+    _set_panel_task_phase(panel, "video", _provider_phase_from_status(status_data.get("status")))
     if status_data["status"] in {"failed", "cancelled"}:
-        panel.status = PANEL_STATUS_FAILED
         panel.error_message = status_data.get("error_message")
+    elif status_data["status"] == "completed":
+        panel.error_message = None
+    _refresh_panel_rollup_status(panel)
+
+
+async def _sync_panel_provider_apply_task_record(
+    db: AsyncSession,
+    *,
+    panel: Panel,
+    task_type: str,
+    result_url: str,
+) -> None:
+    provider_task_id = _panel_provider_task_id(panel, task_type)
+    if not provider_task_id:
         return
-    panel.status = PANEL_STATUS_PROCESSING
+
+    task = await get_task_record_by_source_id(db, provider_task_id)
+    if task is None:
+        return
+
+    task.error_message = None
+    await update_task_record(
+        db,
+        task=task,
+        status=TASK_RECORD_STATUS_COMPLETED,
+        progress_percent=100.0,
+        message=f"{task_type} 结果已应用",
+        result={"result_url": result_url},
+        event_type="provider_applied",
+    )
 
 
 async def _apply_panel_result_url(
     db: AsyncSession,
     *,
     panel: Panel,
+    task_type: str,
     target_field: str,
     result_url: str,
+    mark_panel_completed: bool,
 ) -> Panel:
-    setattr(panel, target_field, result_url.strip())
-    panel.status = PANEL_STATUS_COMPLETED
-    panel.error_message = None
+    normalized_result_url = result_url.strip()
+    if not normalized_result_url:
+        raise HTTPException(status_code=400, detail="result_url 不能为空")
+    setattr(panel, target_field, normalized_result_url)
+    _set_panel_task_phase(panel, task_type, "succeeded")
+    if mark_panel_completed or task_type in {"tts", "lipsync"}:
+        panel.error_message = None
+    _refresh_panel_rollup_status(panel)
+    await _sync_panel_provider_apply_task_record(
+        db,
+        panel=panel,
+        task_type=task_type,
+        result_url=normalized_result_url,
+    )
     await db.commit()
     await db.refresh(panel)
     return await _get_panel_with_details_or_404(panel.id, db)
@@ -674,8 +1192,66 @@ def _effective_voice_strategy(effective_voice: dict[str, Any]) -> dict[str, Any]
 
 
 
+def _resolved_effective_voice(panel: Panel, effective: dict[str, Any]) -> dict[str, Any]:
+    effective_voice = _effective_voice_context(effective)
+    return {
+        "text": _effective_voice_text(panel, effective),
+        "voice_id": _optional_text(effective_voice.get("voice_id")) or panel.voice_id,
+        "entity_id": _optional_text(effective_voice.get("entity_id")),
+        "role_tag": _optional_text(effective_voice.get("role_tag")),
+        "provider": _optional_text(effective_voice.get("provider")),
+        "voice_code": _optional_text(effective_voice.get("voice_code")),
+        "strategy": _effective_voice_strategy(effective_voice),
+    }
+
+
+
 def _optional_text(value: Any) -> str | None:
     return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+def _panel_voice_source_text(panel: Panel) -> str:
+    return (panel.tts_text or panel.script_text or "").strip()
+
+
+def _analyze_voice_text(source_text: str) -> dict[str, Any]:
+    length = len(source_text)
+    sentence_count = max(1, source_text.count("。") + source_text.count("！") + source_text.count("？"))
+    avg_chars = max(1, length // sentence_count)
+    speaking_rate_cps = 4.5
+    estimated_seconds = round(length / speaking_rate_cps, 2) if length else 0.0
+    return {
+        "has_text": bool(source_text),
+        "text_length": length,
+        "sentence_count": sentence_count,
+        "avg_chars_per_sentence": avg_chars,
+        "estimated_seconds": estimated_seconds,
+    }
+
+
+def _apply_voice_design_request(binding: dict[str, Any], body: VoiceDesignRequest) -> dict[str, Any]:
+    updated = dict(binding)
+    if body.mood is not None:
+        updated["mood"] = body.mood.strip()
+    if body.speed is not None:
+        updated["speed"] = float(body.speed)
+    if body.pitch is not None:
+        updated["pitch"] = float(body.pitch)
+    updated["designed_at"] = datetime.now(timezone.utc).isoformat()
+    return updated
+
+
+def _build_voice_design_response(
+    panel: Panel,
+    target_override: PanelAssetOverride,
+    binding: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "panel_id": panel.id,
+        "voice_id": target_override.asset_id,
+        "entity_id": target_override.entity_id,
+        "binding": binding,
+    }
 
 
 def _normalize_voice_binding_input(body: VoiceBindingRequest) -> tuple[str | None, str | None, dict[str, Any]]:
@@ -713,8 +1289,8 @@ async def _ensure_panel_voice_override(
         return voice_overrides[0]
 
     effective = await _load_effective_panel_binding(panel, db)
-    effective_voice = _effective_voice_context(effective)
-    voice_id = _optional_text(effective_voice.get("voice_id"))
+    resolved_voice = _resolved_effective_voice(panel, effective)
+    voice_id = resolved_voice["voice_id"]
     if voice_id is None:
         raise HTTPException(status_code=400, detail="当前分镜未绑定语音，无法设计语音参数")
 
@@ -722,9 +1298,9 @@ async def _ensure_panel_voice_override(
         panel,
         db=db,
         voice_id=voice_id,
-        strategy=_effective_voice_strategy(effective_voice),
-        entity_id=_optional_text(effective_voice.get("entity_id")),
-        role_tag=_optional_text(effective_voice.get("role_tag")),
+        strategy=resolved_voice["strategy"],
+        entity_id=resolved_voice["entity_id"],
+        role_tag=resolved_voice["role_tag"],
     )
     panel = await _get_panel_with_details_or_404(panel.id, db)
     voice_overrides = _sorted_voice_overrides(panel)
@@ -739,15 +1315,13 @@ def _build_panel_tts_payload(
     effective: dict[str, Any],
     extra_payload: dict[str, Any],
 ) -> dict[str, Any]:
-    effective_voice = _effective_voice_context(effective)
-    payload = {
-        "text": _effective_voice_text(panel, effective),
-        "voice_id": _optional_text(effective_voice.get("voice_id")) or panel.voice_id,
-        "binding": _effective_voice_strategy(effective_voice),
-        "voice_provider": _optional_text(effective_voice.get("provider")),
-        "voice_code": _optional_text(effective_voice.get("voice_code")),
-        **extra_payload,
-    }
+    resolved_voice = _resolved_effective_voice(panel, effective)
+    payload = dict(extra_payload)
+    payload["text"] = resolved_voice["text"]
+    payload["voice_id"] = resolved_voice["voice_id"]
+    payload["binding"] = resolved_voice["strategy"]
+    payload["voice_provider"] = resolved_voice["provider"]
+    payload["voice_code"] = resolved_voice["voice_code"]
     return payload
 
 
@@ -769,13 +1343,13 @@ def _build_panel_video_payload(
     effective: dict[str, Any],
     extra_payload: dict[str, Any],
 ) -> dict[str, Any]:
-    return {
-        "prompt": _effective_visual_prompt(panel, effective),
-        "negative_prompt": panel.negative_prompt,
-        "duration_seconds": panel.duration_seconds,
-        "reference_image_url": _effective_reference_image(panel, effective),
-        **extra_payload,
-    }
+    seconds = int(round(float(panel.duration_seconds or 0.0)))
+    payload = dict(extra_payload)
+    payload["prompt"] = _effective_visual_prompt(panel, effective)
+    payload["negative_prompt"] = panel.negative_prompt
+    payload["seconds"] = max(1, seconds)
+    payload["reference_image_url"] = _effective_reference_image(panel, effective)
+    return payload
 
 
 
@@ -784,35 +1358,30 @@ def _build_panel_lipsync_payload(panel: Panel, extra_payload: dict[str, Any]) ->
         raise HTTPException(status_code=400, detail="请先提供原始视频（panel.video_url）")
     if not panel.tts_audio_url:
         raise HTTPException(status_code=400, detail="请先提供语音音频（panel.tts_audio_url）")
-    return {
-        "video_url": panel.video_url,
-        "audio_url": panel.tts_audio_url,
-        "panel_id": panel.id,
-        **extra_payload,
-    }
+    payload = dict(extra_payload)
+    payload["video_url"] = panel.video_url
+    payload["audio_url"] = panel.tts_audio_url
+    payload["panel_id"] = panel.id
+    return payload
 
 
-def _build_panel_lipsync_submit_payload(
+def _build_panel_lipsync_payload_with_effective(
     panel: Panel,
-    _effective: dict[str, Any],
+    _: dict[str, Any],
     extra_payload: dict[str, Any],
 ) -> dict[str, Any]:
     return _build_panel_lipsync_payload(panel, extra_payload)
 
 
-async def _submit_panel_provider_request(
+async def _submit_panel_provider_payload(
     db: AsyncSession,
     *,
-    panel_id: str,
+    panel: Panel,
     body: ProviderSubmitRequest,
     task_type: str,
     usage_type: str,
-    payload_builder: Callable[[Panel, dict[str, Any], dict[str, Any]], dict[str, Any]],
-    load_effective_binding: bool = False,
+    payload: dict[str, Any],
 ) -> dict[str, Any]:
-    panel = await _get_panel_with_details_or_404(panel_id, db)
-    effective = await _load_effective_panel_binding(panel, db) if load_effective_binding else {}
-    payload = payload_builder(panel, effective, body.payload)
     return await _submit_panel_provider_task(
         db,
         panel=panel,
@@ -823,66 +1392,198 @@ async def _submit_panel_provider_request(
     )
 
 
-async def _get_panel_provider_status_response(
+async def _submit_effective_panel_provider_request(
     db: AsyncSession,
     *,
     panel_id: str,
-    provider_key: str,
-    missing_task_detail: str,
-    sync_panel_status: bool = False,
+    body: ProviderSubmitRequest,
+    task_type: str,
+    usage_type: str,
+    payload_builder: Callable[[Panel, dict[str, Any], dict[str, Any]], dict[str, Any]],
 ) -> dict[str, Any]:
     panel = await _get_panel_with_details_or_404(panel_id, db)
+    episode = await get_episode_or_404(panel.episode_id, db)
+    resolved_body = await _resolve_provider_submit_request(
+        db,
+        episode=episode,
+        task_type=task_type,
+        body=body,
+    )
+    effective = await _load_effective_panel_binding(panel, db)
+    payload = payload_builder(panel, effective, resolved_body.payload)
+    return await _submit_panel_provider_payload(
+        db,
+        panel=panel,
+        body=resolved_body,
+        task_type=task_type,
+        usage_type=usage_type,
+        payload=payload,
+    )
+
+
+def _panel_has_provider_output(panel: Panel, task_type: str) -> bool:
+    if task_type == "video":
+        return bool(panel.video_url or panel.lipsync_video_url)
+    return bool(_panel_provider_output_url(panel, task_type))
+
+
+async def _submit_episode_panels_provider_batch(
+    db: AsyncSession,
+    *,
+    episode_id: str,
+    body: ProviderBatchSubmitRequest,
+    task_type: str,
+    usage_type: str,
+    payload_builder: Callable[[Panel, dict[str, Any], dict[str, Any]], dict[str, Any]],
+) -> dict[str, Any]:
+    episode = await get_episode_or_404(episode_id, db)
+    resolved_body = await _resolve_provider_submit_request(
+        db,
+        episode=episode,
+        task_type=task_type,
+        body=body,
+    )
+    panels = await _list_panels_with_details(db, episode_id=episode_id)
+    allowed_ids = set(body.panel_ids) if body.panel_ids else None
+
+    total = 0
+    submitted = 0
+    skipped = 0
+    errors: list[dict[str, Any]] = []
+
+    for panel in panels:
+        if allowed_ids is not None and panel.id not in allowed_ids:
+            continue
+
+        total += 1
+        if not body.force and _panel_has_provider_output(panel, task_type):
+            skipped += 1
+            continue
+
+        try:
+            effective = await _load_effective_panel_binding(panel, db)
+            payload = payload_builder(panel, effective, resolved_body.payload)
+            if task_type == "video" and not str(payload.get("prompt") or "").strip():
+                raise HTTPException(status_code=400, detail="缺少有效 prompt，无法提交视频生成")
+            if task_type == "tts" and not str(payload.get("text") or "").strip():
+                raise HTTPException(status_code=400, detail="缺少有效 text，无法提交语音生成")
+
+            await _submit_panel_provider_payload(
+                db,
+                panel=panel,
+                body=resolved_body,
+                task_type=task_type,
+                usage_type=usage_type,
+                payload=payload,
+            )
+            submitted += 1
+        except HTTPException as exc:
+            errors.append({
+                "panel_id": panel.id,
+                "title": panel.title,
+                "detail": exc.detail,
+            })
+        except Exception as exc:  # noqa: BLE001
+            errors.append({
+                "panel_id": panel.id,
+                "title": panel.title,
+                "detail": str(exc),
+            })
+
+    return {
+        "episode_id": episode.id,
+        "provider_key": resolved_body.provider_key,
+        "task_type": task_type,
+        "total": total,
+        "submitted": submitted,
+        "skipped": skipped,
+        "failed": len(errors),
+        "errors": errors,
+    }
+
+
+async def _build_panel_provider_status_response(
+    db: AsyncSession,
+    *,
+    panel_id: str,
+    task_type: str,
+    provider_key: str | None,
+    missing_task_detail: str,
+    panel_status_applier: Callable[[Panel, dict[str, Any]], None] | None = None,
+) -> dict[str, Any]:
+    panel = await _get_panel_with_details_or_404(panel_id, db)
+    resolved_provider_key = await _resolve_provider_status_key(
+        db,
+        panel=panel,
+        task_type=task_type,
+        provider_key=provider_key,
+    )
     status_data = await _query_and_sync_panel_provider_status(
         db,
         panel=panel,
-        provider_key=provider_key,
+        task_type=task_type,
+        provider_key=resolved_provider_key,
         missing_task_detail=missing_task_detail,
     )
-    if sync_panel_status:
-        _apply_video_provider_status(panel, status_data)
+    response_status = {
+        **status_data,
+        "provider_key": resolved_provider_key,
+    }
+    if panel_status_applier is None:
         await db.commit()
-        panel = await _get_panel_with_details_or_404(panel.id, db)
-        return {
-            "panel": _to_panel_response(panel).model_dump(),
-            "provider_status": status_data,
-        }
+        return response_status
+
+    panel_status_applier(panel, status_data)
     await db.commit()
-    return status_data
+    panel = await _get_panel_with_details_or_404(panel.id, db)
+    return {
+        "panel": _to_panel_response(panel).model_dump(),
+        "provider_status": response_status,
+    }
 
 
 async def _apply_panel_provider_result_response(
     db: AsyncSession,
     *,
     panel_id: str,
+    task_type: str,
     target_field: str,
     result_url: str,
+    mark_panel_completed: bool,
 ) -> PanelResponse:
     panel = await _get_panel_with_details_or_404(panel_id, db)
-    panel = await _apply_panel_result_url(db, panel=panel, target_field=target_field, result_url=result_url)
+    panel = await _apply_panel_result_url(
+        db,
+        panel=panel,
+        task_type=task_type,
+        target_field=target_field,
+        result_url=result_url,
+        mark_panel_completed=mark_panel_completed,
+    )
     return _to_panel_response(panel)
 
 
 @router.post("/panels/{panel_id}/video/submit", response_model=ApiResponse[dict])
 async def submit_panel_video(panel_id: str, body: ProviderSubmitRequest, db: AsyncSession = Depends(get_db)):
-    return ApiResponse(data=await _submit_panel_provider_request(
+    return ApiResponse(data=await _submit_effective_panel_provider_request(
         db,
         panel_id=panel_id,
         body=body,
         task_type="video",
         usage_type="panel_video_generate",
         payload_builder=_build_panel_video_payload,
-        load_effective_binding=True,
     ))
 
 
 @router.get("/panels/{panel_id}/video/status", response_model=ApiResponse[dict])
-async def get_panel_video_status(panel_id: str, provider_key: str, db: AsyncSession = Depends(get_db)):
-    return ApiResponse(data=await _get_panel_provider_status_response(
+async def get_panel_video_status(panel_id: str, provider_key: str | None = None, db: AsyncSession = Depends(get_db)):
+    return ApiResponse(data=await _build_panel_provider_status_response(
         db,
         panel_id=panel_id,
+        task_type="video",
         provider_key=provider_key,
         missing_task_detail="该分镜尚未提交视频任务",
-        sync_panel_status=True,
+        panel_status_applier=_apply_video_provider_status,
     ))
 
 
@@ -891,27 +1592,19 @@ async def apply_panel_video(panel_id: str, body: ProviderApplyRequest, db: Async
     return ApiResponse(data=await _apply_panel_provider_result_response(
         db,
         panel_id=panel_id,
+        task_type="video",
         target_field="video_url",
         result_url=body.result_url,
+        mark_panel_completed=True,
     ))
 
 
 @router.post("/panels/{panel_id}/voice/analyze", response_model=ApiResponse[dict])
 async def analyze_panel_voice(panel_id: str, db: AsyncSession = Depends(get_db)):
     panel = await _get_panel_with_details_or_404(panel_id, db)
-    source_text = (panel.tts_text or panel.script_text or "").strip()
-    length = len(source_text)
-    sentence_count = max(1, source_text.count("。") + source_text.count("！") + source_text.count("？"))
-    avg_chars = max(1, length // sentence_count)
-    speaking_rate_cps = 4.5
-    estimated_seconds = round(length / speaking_rate_cps, 2) if length else 0.0
     return ApiResponse(data={
         "panel_id": panel.id,
-        "has_text": bool(source_text),
-        "text_length": length,
-        "sentence_count": sentence_count,
-        "avg_chars_per_sentence": avg_chars,
-        "estimated_seconds": estimated_seconds,
+        **_analyze_voice_text(_panel_voice_source_text(panel)),
     })
 
 
@@ -921,35 +1614,61 @@ async def design_panel_voice(panel_id: str, body: VoiceDesignRequest, db: AsyncS
     from app.services.json_codec import to_json_text
 
     target_override = await _ensure_panel_voice_override(panel, db)
-    binding = json_dict_or_none(target_override.strategy_json) or {}
-    if body.mood is not None:
-        binding["mood"] = body.mood.strip()
-    if body.speed is not None:
-        binding["speed"] = float(body.speed)
-    if body.pitch is not None:
-        binding["pitch"] = float(body.pitch)
-    binding["designed_at"] = datetime.now(timezone.utc).isoformat()
+    binding = _apply_voice_design_request(json_dict_or_none(target_override.strategy_json) or {}, body)
     target_override.strategy_json = to_json_text(binding) if binding else None
 
     await _compile_panel_binding_state(panel, db)
-    return ApiResponse(data={
-        "panel_id": panel.id,
-        "voice_id": target_override.asset_id,
-        "entity_id": target_override.entity_id,
-        "binding": binding,
-    })
+    return ApiResponse(data=_build_voice_design_response(panel, target_override, binding))
 
 
 @router.post("/panels/{panel_id}/voice/generate-lines", response_model=ApiResponse[dict])
 async def generate_panel_voice_lines(panel_id: str, body: ProviderSubmitRequest, db: AsyncSession = Depends(get_db)):
-    return ApiResponse(data=await _submit_panel_provider_request(
+    return ApiResponse(data=await _submit_effective_panel_provider_request(
         db,
         panel_id=panel_id,
         body=body,
         task_type="tts",
         usage_type="panel_tts_generate",
         payload_builder=_build_panel_tts_payload,
-        load_effective_binding=True,
+    ))
+
+
+@router.post("/episodes/{episode_id}/panels/voice/submit-batch", response_model=ApiResponse[dict])
+async def submit_episode_panels_voice_batch(
+    episode_id: str,
+    body: ProviderBatchSubmitRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    return ApiResponse(data=await _submit_episode_panels_provider_batch(
+        db,
+        episode_id=episode_id,
+        body=body,
+        task_type="tts",
+        usage_type="panel_tts_generate",
+        payload_builder=_build_panel_tts_payload,
+    ))
+
+
+@router.get("/panels/{panel_id}/voice/status", response_model=ApiResponse[dict])
+async def get_panel_voice_status(panel_id: str, provider_key: str | None = None, db: AsyncSession = Depends(get_db)):
+    return ApiResponse(data=await _build_panel_provider_status_response(
+        db,
+        panel_id=panel_id,
+        task_type="tts",
+        provider_key=provider_key,
+        missing_task_detail="该分镜尚未提交语音任务",
+    ))
+
+
+@router.post("/panels/{panel_id}/voice/apply", response_model=ApiResponse[PanelResponse])
+async def apply_panel_voice(panel_id: str, body: ProviderApplyRequest, db: AsyncSession = Depends(get_db)):
+    return ApiResponse(data=await _apply_panel_provider_result_response(
+        db,
+        panel_id=panel_id,
+        task_type="tts",
+        target_field="tts_audio_url",
+        result_url=body.result_url,
+        mark_panel_completed=False,
     ))
 
 
@@ -972,21 +1691,46 @@ async def bind_panel_voice(panel_id: str, body: VoiceBindingRequest, db: AsyncSe
 
 @router.post("/panels/{panel_id}/lipsync/submit", response_model=ApiResponse[dict])
 async def submit_panel_lipsync(panel_id: str, body: ProviderSubmitRequest, db: AsyncSession = Depends(get_db)):
-    return ApiResponse(data=await _submit_panel_provider_request(
+    panel = await _get_panel_with_details_or_404(panel_id, db)
+    episode = await get_episode_or_404(panel.episode_id, db)
+    resolved_body = await _resolve_provider_submit_request(
         db,
-        panel_id=panel_id,
+        episode=episode,
+        task_type="lipsync",
+        body=body,
+    )
+    return ApiResponse(data=await _submit_panel_provider_payload(
+        db,
+        panel=panel,
+        body=resolved_body,
+        task_type="lipsync",
+        usage_type="panel_lipsync_generate",
+        payload=_build_panel_lipsync_payload(panel, resolved_body.payload),
+    ))
+
+
+@router.post("/episodes/{episode_id}/panels/lipsync/submit-batch", response_model=ApiResponse[dict])
+async def submit_episode_panels_lipsync_batch(
+    episode_id: str,
+    body: ProviderBatchSubmitRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    return ApiResponse(data=await _submit_episode_panels_provider_batch(
+        db,
+        episode_id=episode_id,
         body=body,
         task_type="lipsync",
         usage_type="panel_lipsync_generate",
-        payload_builder=_build_panel_lipsync_submit_payload,
+        payload_builder=_build_panel_lipsync_payload_with_effective,
     ))
 
 
 @router.get("/panels/{panel_id}/lipsync/status", response_model=ApiResponse[dict])
-async def get_panel_lipsync_status(panel_id: str, provider_key: str, db: AsyncSession = Depends(get_db)):
-    return ApiResponse(data=await _get_panel_provider_status_response(
+async def get_panel_lipsync_status(panel_id: str, provider_key: str | None = None, db: AsyncSession = Depends(get_db)):
+    return ApiResponse(data=await _build_panel_provider_status_response(
         db,
         panel_id=panel_id,
+        task_type="lipsync",
         provider_key=provider_key,
         missing_task_detail="该分镜尚未提交口型同步任务",
     ))
@@ -997,6 +1741,8 @@ async def apply_panel_lipsync(panel_id: str, body: ProviderApplyRequest, db: Asy
     return ApiResponse(data=await _apply_panel_provider_result_response(
         db,
         panel_id=panel_id,
+        task_type="lipsync",
         target_field="lipsync_video_url",
         result_url=body.result_url,
+        mark_panel_completed=False,
     ))

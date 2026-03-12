@@ -184,6 +184,7 @@ export default function AssetEditorDrawer({
       width={480}
       open={Boolean(editor)}
       onClose={onClose}
+      forceRender
       destroyOnHidden
       footer={(
         <Space style={{ display: 'flex', justifyContent: 'flex-end' }}>

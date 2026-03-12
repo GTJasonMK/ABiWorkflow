@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import Select, select
+from sqlalchemy import inspect as sa_inspect
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import TaskEvent, TaskRecord
@@ -161,6 +162,12 @@ async def get_task_record_by_source_id(db: AsyncSession, source_task_id: str) ->
 
 
 def serialize_task_record(task: TaskRecord) -> dict[str, Any]:
+    state = sa_inspect(task)
+
+    def safe_dt_iso(attr: str) -> str | None:
+        value = state.dict.get(attr)
+        return value.isoformat() if isinstance(value, datetime) else None
+
     ready = task.status in TASK_RECORD_READY_STATUSES
     successful = task.status == "completed"
     return {
@@ -184,14 +191,16 @@ def serialize_task_record(task: TaskRecord) -> dict[str, Any]:
         "result": from_json_text(task.result_json, {}),
         "error": task.error_message,
         "retry_count": task.retry_count,
-        "started_at": task.started_at.isoformat() if task.started_at else None,
-        "finished_at": task.finished_at.isoformat() if task.finished_at else None,
-        "created_at": task.created_at.isoformat() if task.created_at else None,
-        "updated_at": task.updated_at.isoformat() if task.updated_at else None,
+        "started_at": safe_dt_iso("started_at"),
+        "finished_at": safe_dt_iso("finished_at"),
+        "created_at": safe_dt_iso("created_at"),
+        "updated_at": safe_dt_iso("updated_at"),
     }
 
 
 def serialize_task_event(event: TaskEvent) -> dict[str, Any]:
+    state = sa_inspect(event)
+    created_at = state.dict.get("created_at")
     return {
         "event_no": event.event_no,
         "id": event.id,
@@ -204,5 +213,5 @@ def serialize_task_event(event: TaskEvent) -> dict[str, Any]:
         "progress_percent": event.progress_percent,
         "message": event.message,
         "payload": from_json_text(event.payload_json, {}),
-        "created_at": event.created_at.isoformat() if event.created_at else None,
+        "created_at": created_at.isoformat() if isinstance(created_at, datetime) else None,
     }

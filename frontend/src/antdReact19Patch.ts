@@ -1,26 +1,25 @@
 import { unstableSetRender } from 'antd'
-import { createRoot } from 'react-dom/client'
-import type { Root } from 'react-dom/client'
+import { createRoot, type Root } from 'react-dom/client'
 
-type ContainerWithRoot = HTMLElement & {
-  __antdReactRoot?: Root
-}
+// 直接对当前项目实际使用的 antd 实例打补丁，避免开发期出现 React 19 兼容告警，
+// 同时修复 message / modal / notification / wave 等内部挂载逻辑。
+const reactRoots = new WeakMap<Element | DocumentFragment, Root>()
 
-// React 19 下为 antd v5 设置渲染适配，避免兼容性告警。
 unstableSetRender((node, container) => {
-  const rootContainer = container as ContainerWithRoot
-  if (!rootContainer.__antdReactRoot) {
-    rootContainer.__antdReactRoot = createRoot(container)
+  let root = reactRoots.get(container)
+
+  if (!root) {
+    root = createRoot(container)
+    reactRoots.set(container, root)
   }
 
-  const root = rootContainer.__antdReactRoot
   root.render(node)
 
-  return async () => {
-    await new Promise<void>((resolve) => {
-      setTimeout(resolve, 0)
-    })
-    root.unmount()
-    rootContainer.__antdReactRoot = undefined
-  }
+  return () => new Promise<void>((resolve) => {
+    window.setTimeout(() => {
+      root?.unmount()
+      reactRoots.delete(container)
+      resolve()
+    }, 0)
+  })
 })

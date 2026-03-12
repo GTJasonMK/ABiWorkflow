@@ -1,54 +1,42 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { useParams, useNavigate, useSearchParams } from 'react-router-dom'
+import { useParams, useNavigate } from 'react-router-dom'
 import { Button, Card, Empty, Space, Spin, Tag, Typography, App as AntdApp } from 'antd'
 import {
-  LoadingOutlined,
   PlayCircleOutlined,
   ReloadOutlined,
   ScissorOutlined,
-  StopOutlined,
 } from '@ant-design/icons'
-import { startGeneration } from '../../api/generation'
-import { listEpisodePanels } from '../../api/panels'
+import {
+  listEpisodePanels,
+  submitEpisodePanelsLipsyncBatch,
+  submitEpisodePanelsVideoBatch,
+  submitEpisodePanelsVoiceBatch,
+} from '../../api/panels'
 import { listEpisodes } from '../../api/episodes'
-import { resolveAsyncResult } from '../../api/tasks'
-import { abortProjectTask, getProject } from '../../api/projects'
-import { useWebSocket } from '../../hooks/useWebSocket'
 import type { Panel } from '../../types/panel'
 import type { Episode } from '../../types/episode'
 import PageHeader from '../../components/PageHeader'
-import ProgressBar from '../../components/ProgressBar'
 import WorkflowSteps from '../../components/WorkflowSteps'
 import { getApiErrorMessage } from '../../utils/error'
-import { handleForceRecoverError } from '../../utils/forceRecover'
 import { buildWorkflowStepPath } from '../../utils/workflow'
 import PanelGenerationCard from './PanelGenerationCard'
 
-const { Text } = Typography
-const { Paragraph } = Typography
+const { Paragraph, Text } = Typography
 
 export default function VideoGeneration() {
-  const { id: projectId } = useParams<{ id: string }>()
+  const { id: projectId, episodeId } = useParams<{ id: string; episodeId?: string }>()
   const navigate = useNavigate()
-  const [searchParams] = useSearchParams()
-  const episodeId = (searchParams.get('episodeId') || '').trim() || null
-  const { messages, connected, clearMessages } = useWebSocket(projectId)
-  const { message, modal } = AntdApp.useApp()
-  const [generating, setGenerating] = useState(false)
+  const scopedEpisodeId = (episodeId || '').trim() || null
+  const { message } = AntdApp.useApp()
   const [panels, setPanels] = useState<Panel[]>([])
   const [episodes, setEpisodes] = useState<Episode[]>([])
   const [loadingPanels, setLoadingPanels] = useState(false)
-
-  const generateLastMessage = useMemo(
-    () => [...messages].reverse().find((item) => item.type.startsWith('generate_')) ?? null,
-    [messages],
-  )
+  const [submittingBatch, setSubmittingBatch] = useState<{ mode: 'video' | 'tts' | 'lipsync'; force: boolean } | null>(null)
 
   const selectedEpisode = useMemo(() => {
-    if (!episodeId) return null
-    return episodes.find((episode) => episode.id === episodeId) ?? null
-  }, [episodeId, episodes])
-  const contextEpisodeId = selectedEpisode?.id ?? null
+    if (!scopedEpisodeId) return null
+    return episodes.find((episode) => episode.id === scopedEpisodeId) ?? null
+  }, [episodes, scopedEpisodeId])
 
   const visiblePanels = panels
 
@@ -56,9 +44,14 @@ export default function VideoGeneration() {
 
   const panelStats = useMemo(() => {
     const total = visiblePanels.length
-    const completed = visiblePanels.filter((panel) => panel.status === 'completed' && Boolean(panel.video_url || panel.lipsync_video_url)).length
-    const failed = visiblePanels.filter((panel) => panel.status === 'failed').length
-    return { total, completed, failed }
+    const completed = visiblePanels.filter((panel) => Boolean(panel.video_url || panel.lipsync_video_url)).length
+    const processing = visiblePanels.filter((panel) => (
+      [panel.video_status, panel.tts_status, panel.lipsync_status].some((item) => item === 'queued' || item === 'running')
+    )).length
+    const failed = visiblePanels.filter((panel) => (
+      [panel.video_status, panel.tts_status, panel.lipsync_status].some((item) => item === 'failed')
+    )).length
+    return { total, completed, processing, failed }
   }, [visiblePanels])
 
   const canCompose = useMemo(
@@ -66,12 +59,25 @@ export default function VideoGeneration() {
     [visiblePanels],
   )
 
+  const canBatchVideo = useMemo(
+    () => Boolean(selectedEpisode?.video_provider_key) && visiblePanels.some((panel) => Boolean(panel.visual_prompt || panel.script_text)),
+    [selectedEpisode?.video_provider_key, visiblePanels],
+  )
+  const canBatchTts = useMemo(
+    () => Boolean(selectedEpisode?.tts_provider_key) && visiblePanels.some((panel) => Boolean(panel.tts_text || panel.script_text)),
+    [selectedEpisode?.tts_provider_key, visiblePanels],
+  )
+  const canBatchLipsync = useMemo(
+    () => Boolean(selectedEpisode?.lipsync_provider_key) && visiblePanels.some((panel) => Boolean(panel.video_url && panel.tts_audio_url)),
+    [selectedEpisode?.lipsync_provider_key, visiblePanels],
+  )
+
   const fetchPanels = useCallback(async () => {
-    if (!projectId || !episodeId) return
+    if (!projectId || !scopedEpisodeId) return
     setLoadingPanels(true)
     try {
       const [rows, eps] = await Promise.all([
-        listEpisodePanels(episodeId),
+        listEpisodePanels(scopedEpisodeId),
         listEpisodes(projectId),
       ])
       setPanels(rows)
@@ -81,70 +87,38 @@ export default function VideoGeneration() {
     } finally {
       setLoadingPanels(false)
     }
-  }, [episodeId, message, projectId])
+  }, [message, projectId, scopedEpisodeId])
 
   useEffect(() => {
-    if (!projectId || !episodeId) return
+    if (!projectId || !scopedEpisodeId) return
     void fetchPanels()
-    getProject(projectId).then((project) => {
-      setGenerating(project.status === 'generating')
-    }).catch(() => {
-      setGenerating(false)
-    })
-  }, [episodeId, fetchPanels, projectId])
+  }, [fetchPanels, projectId, scopedEpisodeId])
 
-  const runGenerate = async (forceRecover = false, forceRegenerate = false) => {
-    if (!projectId || !contextEpisodeId) {
-      message.warning('请先在剧本页选择分集后再执行生成')
-      return
-    }
-    const scopeEpisodeId = contextEpisodeId
-    setGenerating(true)
-    clearMessages()
+  const handleBatchSubmit = async (mode: 'video' | 'tts' | 'lipsync', force = false) => {
+    if (!scopedEpisodeId) return
+    setSubmittingBatch({ mode, force })
     try {
-      const startResult = await startGeneration(projectId, { forceRecover, forceRegenerate }, scopeEpisodeId)
-      const result = await resolveAsyncResult(
-        startResult as unknown as Record<string, unknown>,
-        { timeoutMs: 20 * 60 * 1000 },
-      )
-      const completed = Number(result.completed ?? 0)
-      const failed = Number(result.failed ?? 0)
-      const total = Number(result.total_panels ?? 0)
-      message.success(`批量生成完成（当前分集）：${completed}/${total}，失败 ${failed}`)
-    } catch (error) {
-      handleForceRecoverError(error, forceRecover, modal, message, {
-        retryFn: () => runGenerate(true, forceRegenerate),
-        errorFallback: '分镜批量生成失败',
+      const submitter = mode === 'video'
+        ? submitEpisodePanelsVideoBatch
+        : mode === 'tts'
+          ? submitEpisodePanelsVoiceBatch
+          : submitEpisodePanelsLipsyncBatch
+      const result = await submitter(scopedEpisodeId, {
+        payload: {},
+        force,
       })
-    } finally {
-      setGenerating(false)
+      const submitted = Number(result.submitted ?? 0)
+      const skipped = Number(result.skipped ?? 0)
+      const failed = Number(result.failed ?? 0)
+      const total = Number(result.total ?? 0)
+      const modeLabel = mode === 'video' ? '视频' : mode === 'tts' ? '语音' : '口型同步'
+      message.success(`${modeLabel}批量提交完成：提交 ${submitted}/${total}，跳过 ${skipped}，失败 ${failed}`)
       await fetchPanels()
+    } catch (error) {
+      message.error(getApiErrorMessage(error, '批量提交失败'))
+    } finally {
+      setSubmittingBatch(null)
     }
-  }
-
-  const handleAbort = () => {
-    if (!projectId) return
-    modal.confirm({
-      title: '确认取消生成',
-      content: '将强制中止当前批量生成任务，未完成分镜可稍后重试。',
-      okText: '确认取消',
-      okButtonProps: { danger: true },
-      cancelText: '继续等待',
-      onOk: async () => {
-        try {
-          const result = await abortProjectTask(projectId)
-          if (result.aborted) {
-            message.success(result.message)
-          } else {
-            message.info(result.message)
-          }
-          setGenerating(false)
-          await fetchPanels()
-        } catch (err) {
-          message.error(getApiErrorMessage(err, '取消失败'))
-        }
-      },
-    })
   }
 
   if (loadingPanels) {
@@ -155,46 +129,23 @@ export default function VideoGeneration() {
     )
   }
 
-  if (!episodeId) {
+  if (!projectId || !scopedEpisodeId) {
     return (
       <section className="np-page">
         <PageHeader
           kicker="生成流程"
           title="视频生成"
-          subtitle="当前流程仅支持单集操作，请先选择分集。"
+          subtitle="分集参数缺失，请返回分集列表重新进入。"
           onBack={() => {
             if (!projectId) return
             navigate(`/projects/${projectId}/script`)
           }}
           backLabel="返回剧本分集"
-          navigation={<WorkflowSteps episodeIdOverride={null} />}
+          navigation={<WorkflowSteps />}
         />
         <div className="np-page-scroll">
           <Card size="small" className="np-panel-card">
-            <Empty description="缺少分集上下文，请从剧本页选择分集后进入本页面。" />
-          </Card>
-        </div>
-      </section>
-    )
-  }
-
-  if (!selectedEpisode) {
-    return (
-      <section className="np-page">
-        <PageHeader
-          kicker="生成流程"
-          title="视频生成"
-          subtitle="分集上下文无效，请返回剧本页重新选择分集。"
-          onBack={() => {
-            if (!projectId) return
-            navigate(`/projects/${projectId}/script`)
-          }}
-          backLabel="返回剧本分集"
-          navigation={<WorkflowSteps episodeIdOverride={null} />}
-        />
-        <div className="np-page-scroll">
-          <Card size="small" className="np-panel-card">
-            <Empty description="当前分集不存在或已删除，请从剧本页重新进入视频生成。" />
+            <Empty description="分集参数缺失，请从分集列表重新进入视频生成。" />
           </Card>
         </div>
       </section>
@@ -206,39 +157,56 @@ export default function VideoGeneration() {
       <PageHeader
         kicker="生成流程"
         title="视频生成"
-        subtitle="以分镜为主线进行批量生成与逐镜复核。"
+        subtitle="以分镜为主线进行生成与逐镜复核（Provider 模式）。"
         onBack={() => {
-          if (!projectId) return
-          navigate(buildWorkflowStepPath(projectId, 'scenes', contextEpisodeId))
+          if (!projectId || !scopedEpisodeId) return
+          navigate(buildWorkflowStepPath(projectId, 'storyboard', scopedEpisodeId))
         }}
         backLabel="返回上一步"
-        navigation={<WorkflowSteps episodeIdOverride={contextEpisodeId} />}
+        navigation={<WorkflowSteps />}
         actions={(
           <Space>
             <Button
               type="primary"
               icon={<PlayCircleOutlined />}
-              onClick={() => { void runGenerate(false, false) }}
-              disabled={generating || visiblePanels.length === 0}
-              loading={generating}
+              loading={submittingBatch?.mode === 'tts' && !submittingBatch.force}
+              disabled={!canBatchTts}
+              onClick={() => { void handleBatchSubmit('tts') }}
             >
-              {generating ? '生成中...' : '批量生成'}
+              批量语音
             </Button>
-            {generating && (
-              <Button
-                icon={<StopOutlined />}
-                onClick={handleAbort}
-                danger
-              >
-                取消生成
-              </Button>
-            )}
+            <Button
+              type="primary"
+              icon={<PlayCircleOutlined />}
+              loading={submittingBatch?.mode === 'video' && !submittingBatch.force}
+              disabled={!canBatchVideo}
+              onClick={() => { void handleBatchSubmit('video') }}
+            >
+              批量视频
+            </Button>
+            <Button
+              type="primary"
+              icon={<PlayCircleOutlined />}
+              loading={submittingBatch?.mode === 'lipsync' && !submittingBatch.force}
+              disabled={!canBatchLipsync}
+              onClick={() => { void handleBatchSubmit('lipsync') }}
+            >
+              批量口型
+            </Button>
+            <Button
+              danger
+              loading={submittingBatch?.mode === 'video' && submittingBatch.force}
+              disabled={!canBatchVideo}
+              onClick={() => { void handleBatchSubmit('video', true) }}
+            >
+              强制重提视频
+            </Button>
             <Button
               icon={<ScissorOutlined />}
-              disabled={generating || !canCompose}
+              disabled={!canCompose}
               onClick={() => {
-                if (!projectId) return
-                navigate(buildWorkflowStepPath(projectId, 'compose', contextEpisodeId))
+                if (!projectId || !scopedEpisodeId) return
+                navigate(buildWorkflowStepPath(projectId, 'preview', scopedEpisodeId))
               }}
             >
               去合成
@@ -249,32 +217,27 @@ export default function VideoGeneration() {
 
       <div className="np-page-scroll">
         <Paragraph className="np-note" style={{ marginBottom: 12 }}>
-          先完成“资产绑定与提示词复核”，再执行批量生成，可显著减少返工。
+          先完成“资产绑定与提示词复核”，再批量提交生成任务，可显著减少返工。
         </Paragraph>
-
-        {(generating || generateLastMessage) && (
-          <Card size="small" className="np-panel-card">
-            <ProgressBar
-              lastMessage={generateLastMessage}
-              connected={connected}
-              active={generating}
-              activeText="正在批量生成分镜视频..."
-            />
-          </Card>
-        )}
 
         <Card size="small" className="np-panel-card" style={{ marginBottom: 12 }}>
           <Space size={12} wrap align="center">
             <Tag className="np-status-tag">单集模式</Tag>
             <Tag className="np-status-tag">{currentEpisodeTitle || '当前分集'}</Tag>
+            <Tag className="np-status-tag">
+              视频 Provider：{selectedEpisode?.video_provider_key || '未配置'}
+            </Tag>
+            <Tag className="np-status-tag">
+              语音 Provider：{selectedEpisode?.tts_provider_key || '未配置'}
+            </Tag>
+            <Tag className="np-status-tag">
+              口型 Provider：{selectedEpisode?.lipsync_provider_key || '未配置'}
+            </Tag>
             <Tag className="np-status-tag">分镜总数：{panelStats.total}</Tag>
             <Tag className="np-status-tag np-status-generated">已完成：{panelStats.completed}</Tag>
+            <Tag className="np-status-tag">处理中：{panelStats.processing}</Tag>
             <Tag className="np-status-tag np-status-failed">失败：{panelStats.failed}</Tag>
-            {generating ? (
-              <Tag className="np-status-tag np-status-generating" icon={<LoadingOutlined spin />}>生成中</Tag>
-            ) : (
-              <Text type="secondary">可在下方逐分镜复核并手动补提任务</Text>
-            )}
+            <Text type="secondary">可在下方逐分镜复核并按需补提任务</Text>
             <Button
               size="small"
               icon={<ReloadOutlined />}
@@ -286,12 +249,17 @@ export default function VideoGeneration() {
             </Button>
           </Space>
           <Paragraph style={{ marginTop: 8, marginBottom: 0 }} type="secondary">
-            当前分集模式下，“批量生成 / 去合成”仅作用于该分集。
+            当前分集模式下，“批量提交 / 去合成”仅作用于该分集。
           </Paragraph>
+          {selectedEpisode?.workflow_summary.blockers.length ? (
+            <Paragraph style={{ marginTop: 8, marginBottom: 0 }} type="secondary">
+              当前阻塞：{selectedEpisode.workflow_summary.blockers.join('、')}
+            </Paragraph>
+          ) : null}
         </Card>
 
         {visiblePanels.length > 0 ? (
-          <PanelGenerationCard panels={visiblePanels} onRefresh={fetchPanels} />
+          <PanelGenerationCard episode={selectedEpisode} panels={visiblePanels} onRefresh={fetchPanels} />
         ) : (
           <Text type="secondary">暂无分镜数据，可在"分镜编辑"中创建。</Text>
         )}

@@ -47,6 +47,49 @@ interface GlobalAssetManagerProps {
 type ManagerTabKey = 'folders' | 'characters' | 'locations' | 'voices'
 const NO_FOLDER_FILTER_KEY = '__none__'
 
+const EDITOR_KIND_LABELS: Record<EditorKind, string> = {
+  folder: '资产目录',
+  voice: '语音资产',
+  character: '角色资产',
+  location: '地点资产',
+}
+
+type FolderEditorPayload = Parameters<typeof createAssetFolder>[0]
+type VoiceEditorPayload = Parameters<typeof createGlobalVoice>[0]
+type CharacterEditorPayload = Parameters<typeof createGlobalCharacter>[0]
+type LocationEditorPayload = Parameters<typeof createGlobalLocation>[0]
+type EditorPayload = FolderEditorPayload | VoiceEditorPayload | CharacterEditorPayload | LocationEditorPayload
+
+const EDITOR_SUBMITTERS: Record<
+  EditorKind,
+  {
+    create: (payload: EditorPayload) => Promise<unknown>
+    update: (id: string, payload: EditorPayload) => Promise<unknown>
+    remove: (id: string) => Promise<void>
+  }
+> = {
+  folder: {
+    create: (payload) => createAssetFolder(payload as FolderEditorPayload),
+    update: (id, payload) => updateAssetFolder(id, payload as FolderEditorPayload),
+    remove: deleteAssetFolder,
+  },
+  voice: {
+    create: (payload) => createGlobalVoice(payload as VoiceEditorPayload),
+    update: (id, payload) => updateGlobalVoice(id, payload as VoiceEditorPayload),
+    remove: deleteGlobalVoice,
+  },
+  character: {
+    create: (payload) => createGlobalCharacter(payload as CharacterEditorPayload),
+    update: (id, payload) => updateGlobalCharacter(id, payload as CharacterEditorPayload),
+    remove: deleteGlobalCharacter,
+  },
+  location: {
+    create: (payload) => createGlobalLocation(payload as LocationEditorPayload),
+    update: (id, payload) => updateGlobalLocation(id, payload as LocationEditorPayload),
+    remove: deleteGlobalLocation,
+  },
+}
+
 function normalizeText(value: unknown): string | undefined {
   if (typeof value !== 'string') return undefined
   const trimmed = value.trim()
@@ -81,6 +124,97 @@ function matchesSearch(query: string, ...fields: Array<string | null | undefined
   const q = query.trim().toLowerCase()
   if (!q) return true
   return fields.some((field) => field && field.toLowerCase().includes(q))
+}
+
+type FolderScopedItem = {
+  folder_id?: string | null
+}
+
+function filterRowsByFolder<Row extends FolderScopedItem>(rows: Row[], filterKey: string): Row[] {
+  if (filterKey === NO_FOLDER_FILTER_KEY) {
+    return rows.filter((item) => !item.folder_id)
+  }
+  if (filterKey === 'all') return rows
+  return rows.filter((item) => item.folder_id === filterKey)
+}
+
+function filterRowsByFolderAndSearch<Row extends FolderScopedItem>(
+  rows: Row[],
+  filterKey: string,
+  query: string,
+  fields: (row: Row) => Array<string | null | undefined>,
+): Row[] {
+  return filterRowsByFolder(rows, filterKey).filter((row) => matchesSearch(query, ...fields(row)))
+}
+
+function buildEditorSuccessMessage(kind: EditorKind, mode: 'create' | 'edit'): string {
+  return `${EDITOR_KIND_LABELS[kind]}已${mode === 'create' ? '创建' : '更新'}`
+}
+
+function buildBaseAssetPayload(values: Record<string, unknown>) {
+  return {
+    name: String(values.name).trim(),
+    project_id: normalizeNullableId(values.project_id),
+    folder_id: normalizeNullableId(values.folder_id),
+    is_active: Boolean(values.is_active),
+  }
+}
+
+function buildPromptAssetPayload(values: Record<string, unknown>) {
+  return {
+    ...buildBaseAssetPayload(values),
+    description: normalizeText(values.description),
+    prompt_template: normalizeText(values.prompt_template),
+    reference_image_url: normalizeText(values.reference_image_url),
+    tags: parseTags(values.tags_input),
+  }
+}
+
+function buildEditorPayload(kind: EditorKind, values: Record<string, unknown>): EditorPayload {
+  if (kind === 'folder') {
+    return {
+      name: String(values.name).trim(),
+      folder_type: normalizeText(values.folder_type) ?? 'generic',
+      storage_path: normalizeText(values.storage_path),
+      description: normalizeText(values.description),
+      sort_order: Number(values.sort_order ?? 0),
+      is_active: Boolean(values.is_active),
+    }
+  }
+
+  if (kind === 'voice') {
+    return {
+      ...buildBaseAssetPayload(values),
+      provider: normalizeText(values.provider) ?? 'edge-tts',
+      voice_code: String(values.voice_code).trim(),
+      language: normalizeText(values.language),
+      gender: normalizeText(values.gender),
+      sample_audio_url: normalizeText(values.sample_audio_url),
+      style_prompt: normalizeText(values.style_prompt),
+      meta: {},
+    }
+  }
+
+  if (kind === 'character') {
+    return {
+      ...buildPromptAssetPayload(values),
+      alias: normalizeText(values.alias),
+      default_voice_id: normalizeNullableId(values.default_voice_id),
+    }
+  }
+
+  return buildPromptAssetPayload(values)
+}
+
+async function submitEditorPayload(editor: EditorState, payload: EditorPayload): Promise<void> {
+  const submitter = EDITOR_SUBMITTERS[editor.kind]
+  if (editor.mode === 'create') {
+    await submitter.create(payload)
+    return
+  }
+  if (editor.record) {
+    await submitter.update(editor.record.id, payload)
+  }
 }
 
 function buildEditorFormValues(
@@ -262,38 +396,26 @@ export default function GlobalAssetManager({ overview, projectOptions, defaultPr
     )
   }, [currentOverview.folders, searchText])
 
-  const filteredCharacters = useMemo(() => {
-    const filterKey = folderFiltersByTab.characters
-    let items = currentOverview.characters
-    if (filterKey === NO_FOLDER_FILTER_KEY) {
-      items = items.filter((item) => !item.folder_id)
-    } else if (filterKey !== 'all') {
-      items = items.filter((item) => item.folder_id === filterKey)
-    }
-    return items.filter((item) => matchesSearch(searchText, item.name, item.description, item.alias))
-  }, [currentOverview.characters, folderFiltersByTab.characters, searchText])
+  const filteredCharacters = useMemo(() => filterRowsByFolderAndSearch(
+    currentOverview.characters,
+    folderFiltersByTab.characters,
+    searchText,
+    (item) => [item.name, item.description, item.alias],
+  ), [currentOverview.characters, folderFiltersByTab.characters, searchText])
 
-  const filteredLocations = useMemo(() => {
-    const filterKey = folderFiltersByTab.locations
-    let items = currentOverview.locations
-    if (filterKey === NO_FOLDER_FILTER_KEY) {
-      items = items.filter((item) => !item.folder_id)
-    } else if (filterKey !== 'all') {
-      items = items.filter((item) => item.folder_id === filterKey)
-    }
-    return items.filter((item) => matchesSearch(searchText, item.name, item.description))
-  }, [currentOverview.locations, folderFiltersByTab.locations, searchText])
+  const filteredLocations = useMemo(() => filterRowsByFolderAndSearch(
+    currentOverview.locations,
+    folderFiltersByTab.locations,
+    searchText,
+    (item) => [item.name, item.description],
+  ), [currentOverview.locations, folderFiltersByTab.locations, searchText])
 
-  const filteredVoices = useMemo(() => {
-    const filterKey = folderFiltersByTab.voices
-    let items = currentOverview.voices
-    if (filterKey === NO_FOLDER_FILTER_KEY) {
-      items = items.filter((item) => !item.folder_id)
-    } else if (filterKey !== 'all') {
-      items = items.filter((item) => item.folder_id === filterKey)
-    }
-    return items.filter((item) => matchesSearch(searchText, item.name, item.style_prompt, item.voice_code))
-  }, [currentOverview.voices, folderFiltersByTab.voices, searchText])
+  const filteredVoices = useMemo(() => filterRowsByFolderAndSearch(
+    currentOverview.voices,
+    folderFiltersByTab.voices,
+    searchText,
+    (item) => [item.name, item.style_prompt, item.voice_code],
+  ), [currentOverview.voices, folderFiltersByTab.voices, searchText])
 
   const loadScopedOverview = useCallback(async (force = false) => {
     if (scope === 'project' && !scopeProjectId) {
@@ -324,10 +446,7 @@ export default function GlobalAssetManager({ overview, projectOptions, defaultPr
   }
 
   useEffect(() => {
-    if (!editor) {
-      form.resetFields()
-      return
-    }
+    if (!editor) return
     form.resetFields()
     form.setFieldsValue(buildEditorFormValues(editor, defaultProjectId ?? null, scope, scopeProjectId))
   }, [defaultProjectId, editor, form, scope, scopeProjectId])
@@ -349,84 +468,9 @@ export default function GlobalAssetManager({ overview, projectOptions, defaultPr
     try {
       const values = await form.validateFields()
       setSaving(true)
-
-      if (editor.kind === 'folder') {
-        const payload = {
-          name: String(values.name).trim(),
-          folder_type: normalizeText(values.folder_type) ?? 'generic',
-          storage_path: normalizeText(values.storage_path),
-          description: normalizeText(values.description),
-          sort_order: Number(values.sort_order ?? 0),
-          is_active: Boolean(values.is_active),
-        }
-        if (editor.mode === 'create') {
-          await createAssetFolder(payload)
-          message.success('资产目录已创建')
-        } else if (editor.record) {
-          await updateAssetFolder(editor.record.id, payload)
-          message.success('资产目录已更新')
-        }
-      } else if (editor.kind === 'voice') {
-        const payload = {
-          name: String(values.name).trim(),
-          project_id: normalizeNullableId(values.project_id),
-          provider: normalizeText(values.provider) ?? 'edge-tts',
-          voice_code: String(values.voice_code).trim(),
-          folder_id: normalizeNullableId(values.folder_id),
-          language: normalizeText(values.language),
-          gender: normalizeText(values.gender),
-          sample_audio_url: normalizeText(values.sample_audio_url),
-          style_prompt: normalizeText(values.style_prompt),
-          is_active: Boolean(values.is_active),
-          meta: {},
-        }
-        if (editor.mode === 'create') {
-          await createGlobalVoice(payload)
-          message.success('语音资产已创建')
-        } else if (editor.record) {
-          await updateGlobalVoice(editor.record.id, payload)
-          message.success('语音资产已更新')
-        }
-      } else if (editor.kind === 'character') {
-        const payload = {
-          name: String(values.name).trim(),
-          project_id: normalizeNullableId(values.project_id),
-          folder_id: normalizeNullableId(values.folder_id),
-          alias: normalizeText(values.alias),
-          description: normalizeText(values.description),
-          prompt_template: normalizeText(values.prompt_template),
-          reference_image_url: normalizeText(values.reference_image_url),
-          default_voice_id: normalizeNullableId(values.default_voice_id),
-          tags: parseTags(values.tags_input),
-          is_active: Boolean(values.is_active),
-        }
-        if (editor.mode === 'create') {
-          await createGlobalCharacter(payload)
-          message.success('角色资产已创建')
-        } else if (editor.record) {
-          await updateGlobalCharacter(editor.record.id, payload)
-          message.success('角色资产已更新')
-        }
-      } else {
-        const payload = {
-          name: String(values.name).trim(),
-          project_id: normalizeNullableId(values.project_id),
-          folder_id: normalizeNullableId(values.folder_id),
-          description: normalizeText(values.description),
-          prompt_template: normalizeText(values.prompt_template),
-          reference_image_url: normalizeText(values.reference_image_url),
-          tags: parseTags(values.tags_input),
-          is_active: Boolean(values.is_active),
-        }
-        if (editor.mode === 'create') {
-          await createGlobalLocation(payload)
-          message.success('地点资产已创建')
-        } else if (editor.record) {
-          await updateGlobalLocation(editor.record.id, payload)
-          message.success('地点资产已更新')
-        }
-      }
-
+      const payload = buildEditorPayload(editor.kind, values as Record<string, unknown>)
+      await submitEditorPayload(editor, payload)
+      message.success(buildEditorSuccessMessage(editor.kind, editor.mode))
       await reloadGlobalAssets()
       closeEditor()
     } catch (error) {
@@ -441,15 +485,7 @@ export default function GlobalAssetManager({ overview, projectOptions, defaultPr
 
   const handleDelete = async (kind: EditorKind, id: string) => {
     try {
-      if (kind === 'folder') {
-        await deleteAssetFolder(id)
-      } else if (kind === 'voice') {
-        await deleteGlobalVoice(id)
-      } else if (kind === 'character') {
-        await deleteGlobalCharacter(id)
-      } else {
-        await deleteGlobalLocation(id)
-      }
+      await EDITOR_SUBMITTERS[kind].remove(id)
       await reloadGlobalAssets()
       message.success('删除成功')
     } catch (error) {

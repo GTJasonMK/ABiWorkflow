@@ -60,9 +60,11 @@ function HomeRedirect() {
 
 const Dashboard = lazy(() => import('./pages/Dashboard'))
 const ProjectList = lazy(() => import('./pages/ProjectList'))
+const ProjectWorkbench = lazy(() => import('./pages/ProjectWorkbench'))
+const ProjectResources = lazy(() => import('./pages/ProjectResources'))
 const ScriptInput = lazy(() => import('./pages/ScriptInput'))
 const AssetBinding = lazy(() => import('./pages/AssetBinding'))
-const SceneEditor = lazy(() => import('./pages/SceneEditor'))
+const StoryboardEditor = lazy(() => import('./pages/StoryboardEditor'))
 const VideoGeneration = lazy(() => import('./pages/VideoGeneration'))
 const CompositionPreview = lazy(() => import('./pages/CompositionPreview'))
 const TaskHub = lazy(() => import('./pages/TaskHub'))
@@ -92,11 +94,13 @@ const router = createBrowserRouter([
       { index: true, element: <HomeRedirect /> },
       { path: 'dashboard', element: pageSuspense(<Dashboard />) },
       { path: 'projects', element: pageSuspense(<ProjectList />) },
+      { path: 'projects/:id', element: pageSuspense(<ProjectWorkbench />) },
+      { path: 'projects/:id/resources', element: pageSuspense(<ProjectResources />) },
       { path: 'projects/:id/script', element: pageSuspense(<ScriptInput />) },
-      { path: 'projects/:id/assets', element: pageSuspense(<AssetBinding />) },
-      { path: 'projects/:id/scenes', element: pageSuspense(<SceneEditor />) },
-      { path: 'projects/:id/generate', element: pageSuspense(<VideoGeneration />) },
-      { path: 'projects/:id/compose', element: pageSuspense(<CompositionPreview />) },
+      { path: 'projects/:id/assets/:episodeId', element: pageSuspense(<AssetBinding />) },
+      { path: 'projects/:id/storyboard/:episodeId', element: pageSuspense(<StoryboardEditor />) },
+      { path: 'projects/:id/video/:episodeId', element: pageSuspense(<VideoGeneration />) },
+      { path: 'projects/:id/preview/:episodeId', element: pageSuspense(<CompositionPreview />) },
       { path: 'tasks', element: pageSuspense(<TaskHub />) },
       { path: 'operations', element: pageSuspense(<OperationsCenter />) },
       { path: 'settings', element: pageSuspense(<SystemSettings />) },

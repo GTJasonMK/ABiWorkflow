@@ -58,6 +58,7 @@ function spawnCommand(command, env = process.env) {
 
 async function waitForRendererReady(timeoutMs = 45000) {
   const start = Date.now()
+  let lastProgressAt = 0
   while (Date.now() - start <= timeoutMs) {
     try {
       const response = await fetch(rendererUrl)
@@ -67,12 +68,18 @@ async function waitForRendererReady(timeoutMs = 45000) {
     } catch {
       // Ignore connection errors during startup.
     }
+    const elapsed = Date.now() - start
+    if (elapsed - lastProgressAt >= 5000) {
+      lastProgressAt = elapsed
+      console.log(`[electron-dev] 等待前端开发服务器就绪: ${rendererUrl} (${Math.floor(elapsed / 1000)}s)`)
+    }
     await wait(500)
   }
   return false
 }
 
 function startVite() {
+  console.log(`[electron-dev] 启动 Vite 渲染进程: ${rendererUrl}`)
   viteProcess = spawnCommand(`npm run dev -- --host ${rendererHost} --port ${rendererPort} --strictPort`)
 
   viteProcess.on('exit', (code) => {
@@ -103,6 +110,7 @@ process.on('SIGINT', () => shutdown(0))
 process.on('SIGTERM', () => shutdown(0))
 
 startVite()
+console.log(`[electron-dev] 等待前端开发服务器: ${rendererUrl}`)
 
 const ready = await waitForRendererReady()
 if (!ready) {

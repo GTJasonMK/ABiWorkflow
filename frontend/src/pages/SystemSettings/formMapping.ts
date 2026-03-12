@@ -29,6 +29,7 @@ export function buildUpdatePayload(values: BackendSettingsFormValues): RuntimeSe
   const payload: RuntimeSettingsUpdatePayload = {
     app_name: normalizeInput(values.app_name),
     debug: values.debug,
+    llm_provider: normalizeInput(values.llm_provider),
     llm_model: normalizeInput(values.llm_model),
     video_provider: normalizeInput(values.video_provider),
     video_output_dir: normalizeInput(values.video_output_dir),
@@ -82,6 +83,7 @@ export function mapRuntimeToFormValues(runtime: RuntimeSummaryPayload): BackendS
   return {
     app_name: runtime.app.name || 'AbiWorkflow',
     debug: Boolean(runtime.app.debug),
+    llm_provider: runtime.llm.provider || 'openai',
     llm_model: runtime.llm.model || 'gpt-4o',
     llm_base_url: runtime.llm.base_url ?? '',
     llm_api_key: '',

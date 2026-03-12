@@ -5,16 +5,16 @@ from httpx import AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import CompositionTask, Episode, Panel, Project, Scene, TaskRecord
+from app.models import CompositionTask, Episode, Panel, Project, TaskRecord
 
 
 @pytest.mark.asyncio
-async def test_generate_should_scope_to_episode_and_force_sync_mode(
+async def test_generate_should_reject_episode_scope_async_mode(
     client: AsyncClient,
     db_session: AsyncSession,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    captured_scene_ids: set[str] = set()
+    captured_panel_ids: set[str] = set()
 
     class _FakeProvider:
         max_duration_seconds = 5.0
@@ -24,17 +24,17 @@ async def test_generate_should_scope_to_episode_and_force_sync_mode(
         project_id: str,
         db: AsyncSession,
         *,
-        scene_ids: set[str] | None = None,
+        panel_ids: set[str] | None = None,
     ):  # noqa: ANN001
-        nonlocal captured_scene_ids
-        captured_scene_ids = set(scene_ids or set())
-        stmt = select(Scene).where(Scene.project_id == project_id)
-        if scene_ids:
-            stmt = stmt.where(Scene.id.in_(list(scene_ids)))
-        scenes = (await db.execute(stmt)).scalars().all()
-        for item in scenes:
-            if item.status in {"pending", "failed", "generating"}:
-                item.status = "generated"
+        nonlocal captured_panel_ids
+        captured_panel_ids = set(panel_ids or set())
+        stmt = select(Panel).where(Panel.project_id == project_id)
+        if panel_ids:
+            stmt = stmt.where(Panel.id.in_(list(panel_ids)))
+        panels = (await db.execute(stmt)).scalars().all()
+        for item in panels:
+            if item.status in {"pending", "failed", "processing", "draft"}:
+                item.status = "completed"
         await db.flush()
 
     monkeypatch.setattr("app.api.generation.get_provider", lambda: _FakeProvider())
@@ -70,47 +70,22 @@ async def test_generate_should_scope_to_episode_and_force_sync_mode(
     db_session.add_all([panel_1, panel_2])
     await db_session.flush()
 
-    scene_1 = Scene(
-        project_id=project.id,
-        sequence_order=0,
-        title="场景 1",
-        video_prompt="镜头一提示词",
-        duration_seconds=5.0,
-        status="pending",
-    )
-    scene_2 = Scene(
-        project_id=project.id,
-        sequence_order=1,
-        title="场景 2",
-        video_prompt="镜头二提示词",
-        duration_seconds=5.0,
-        status="generated",
-    )
-    db_session.add_all([scene_1, scene_2])
     await db_session.commit()
 
     response = await client.post(
         f"/api/projects/{project.id}/generate",
         params={"episode_id": episode_1.id, "async_mode": "true"},
     )
-    assert response.status_code == 200
-    payload = response.json()["data"]
-    assert payload["total_panels"] == 1
-    assert payload["completed"] == 1
-    assert payload["failed"] == 0
-    assert "task_id" not in payload
+    assert response.status_code == 400
+    assert response.json()["detail"] == "分集生成暂不支持异步执行"
 
-    await db_session.refresh(scene_1)
-    await db_session.refresh(scene_2)
     await db_session.refresh(project)
-    assert captured_scene_ids == {scene_1.id}
-    assert scene_1.status == "generated"
-    assert scene_2.status == "generated"
+    assert captured_panel_ids == set()
     assert project.status == "parsed"
 
 
 @pytest.mark.asyncio
-async def test_compose_should_scope_to_episode_and_force_sync_mode(
+async def test_compose_should_reject_episode_scope_async_mode(
     client: AsyncClient,
     db_session: AsyncSession,
     monkeypatch: pytest.MonkeyPatch,
@@ -180,20 +155,12 @@ async def test_compose_should_scope_to_episode_and_force_sync_mode(
         params={"episode_id": episode_1.id, "async_mode": "true"},
         json={"include_subtitles": False, "include_tts": False},
     )
-    assert response.status_code == 200
-    payload = response.json()["data"]
-    assert payload["composition_id"] == "composition-episode-only"
-    assert payload["episode_id"] == episode_1.id
-    assert "task_id" not in payload
+    assert response.status_code == 400
+    assert response.json()["detail"] == "分集合成暂不支持异步执行"
 
     await db_session.refresh(project)
-    assert captured_episode_id == episode_1.id
+    assert captured_episode_id is None
     assert project.status == "parsed"
-
-    saved_task = (await db_session.execute(
-        select(CompositionTask).where(CompositionTask.id == "composition-episode-only")
-    )).scalar_one()
-    assert saved_task.episode_id == episode_1.id
 
 
 @pytest.mark.asyncio
@@ -207,13 +174,13 @@ async def test_generate_should_not_pollute_project_status_when_episode_scope_fai
         project_id: str,
         db: AsyncSession,
         *,
-        scene_ids: set[str] | None = None,
+        panel_ids: set[str] | None = None,
     ):  # noqa: ANN001
-        stmt = select(Scene).where(Scene.project_id == project_id)
-        if scene_ids:
-            stmt = stmt.where(Scene.id.in_(list(scene_ids)))
-        scenes = (await db.execute(stmt)).scalars().all()
-        for item in scenes:
+        stmt = select(Panel).where(Panel.project_id == project_id)
+        if panel_ids:
+            stmt = stmt.where(Panel.id.in_(list(panel_ids)))
+        panels = (await db.execute(stmt)).scalars().all()
+        for item in panels:
             item.status = "failed"
         await db.flush()
 
@@ -251,23 +218,6 @@ async def test_generate_should_not_pollute_project_status_when_episode_scope_fai
     ])
     await db_session.flush()
 
-    scene_1 = Scene(
-        project_id=project.id,
-        sequence_order=0,
-        title="场景 1",
-        video_prompt="镜头一提示词",
-        duration_seconds=5.0,
-        status="pending",
-    )
-    scene_2 = Scene(
-        project_id=project.id,
-        sequence_order=1,
-        title="场景 2",
-        video_prompt="镜头二提示词",
-        duration_seconds=5.0,
-        status="generated",
-    )
-    db_session.add_all([scene_1, scene_2])
     await db_session.commit()
 
     response = await client.post(
@@ -291,7 +241,6 @@ async def test_generate_should_not_pollute_project_status_when_episode_scope_fai
     assert task is not None
     assert task.status == "failed"
     assert task.error_message == "仍有 1 个分镜生成失败"
-
 
 @pytest.mark.asyncio
 async def test_latest_composition_should_filter_by_episode_scope(

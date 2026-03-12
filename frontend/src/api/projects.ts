@@ -1,6 +1,7 @@
 import client from './client'
 import type { ApiResponse, PaginatedResponse } from '../types/api'
-import type { Project, ProjectCreate, ProjectListItem, ProjectUpdate } from '../types/project'
+import type { EpisodeProviderPayloadDefaults } from '../types/episode'
+import type { Project, ProjectCreate, ProjectListItem, ProjectUpdate, ProjectWorkspace } from '../types/project'
 
 /** 项目列表查询参数 */
 export interface ListProjectsParams {
@@ -10,6 +11,24 @@ export interface ListProjectsParams {
   status?: string
   sort_by?: string
   sort_order?: string
+}
+
+export interface ProjectScriptWorkspaceEpisodePayload {
+  id?: string
+  title?: string | null
+  summary?: string | null
+  script_text?: string | null
+  video_provider_key?: string | null
+  tts_provider_key?: string | null
+  lipsync_provider_key?: string | null
+  provider_payload_defaults?: EpisodeProviderPayloadDefaults
+  skipped_checks?: string[]
+}
+
+export interface ProjectScriptWorkspacePayload {
+  script_text: string
+  workflow_defaults: NonNullable<ProjectCreate['workflow_defaults']>
+  episodes: ProjectScriptWorkspaceEpisodePayload[]
 }
 
 /** 创建项目 */
@@ -34,15 +53,24 @@ export async function listProjects(params: ListProjectsParams = {}): Promise<Pag
   return resp.data.data!
 }
 
-/** 获取项目详情 */
-export async function getProject(id: string): Promise<Project> {
-  const resp = await client.get<ApiResponse<Project>>(`/projects/${id}`)
+/** 获取项目工作台聚合信息 */
+export async function getProjectWorkspace(id: string): Promise<ProjectWorkspace> {
+  const resp = await client.get<ApiResponse<ProjectWorkspace>>(`/projects/${id}/workspace`)
   return resp.data.data!
 }
 
 /** 更新项目 */
 export async function updateProject(id: string, data: ProjectUpdate): Promise<Project> {
   const resp = await client.put<ApiResponse<Project>>(`/projects/${id}`, data)
+  return resp.data.data!
+}
+
+/** 保存剧本分集工作台 */
+export async function updateProjectScriptWorkspace(
+  id: string,
+  data: ProjectScriptWorkspacePayload,
+): Promise<ProjectWorkspace> {
+  const resp = await client.put<ApiResponse<ProjectWorkspace>>(`/projects/${id}/script-workspace`, data)
   return resp.data.data!
 }
 

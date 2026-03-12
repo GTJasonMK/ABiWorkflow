@@ -25,6 +25,9 @@ export default function RuntimeOverviewCard({ health, runtime }: RuntimeOverview
         <Descriptions.Item label="当前 LLM">
           <Text>{runtime?.llm.model ?? '-'}</Text>
         </Descriptions.Item>
+        <Descriptions.Item label="LLM Provider">
+          <Text>{runtime?.llm.provider ?? '-'}</Text>
+        </Descriptions.Item>
         <Descriptions.Item label="视频提供者">
           <Text>{runtime?.video.provider ?? '-'}</Text>
         </Descriptions.Item>
@@ -32,13 +35,11 @@ export default function RuntimeOverviewCard({ health, runtime }: RuntimeOverview
           <StatusTag ok={Boolean(runtime?.queue.celery_worker_online)} onLabel="在线" offLabel="离线" />
         </Descriptions.Item>
         <Descriptions.Item label="队列模式">
-          <Text>{runtime?.queue.queue_mode === 'sqlite' ? 'SQLite 降级' : 'Redis'}</Text>
+          <Text>Redis</Text>
         </Descriptions.Item>
-        {runtime?.queue.fallback_active && runtime.queue.fallback_reason && (
-          <Descriptions.Item label="降级原因">
-            <Text type="secondary">{runtime.queue.fallback_reason}</Text>
-          </Descriptions.Item>
-        )}
+        <Descriptions.Item label="Redis 连接">
+          <StatusTag ok={Boolean(runtime?.queue.redis_available)} onLabel="正常" offLabel="不可用" />
+        </Descriptions.Item>
       </Descriptions>
     </Card>
   )

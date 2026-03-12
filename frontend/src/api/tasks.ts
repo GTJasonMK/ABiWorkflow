@@ -1,19 +1,16 @@
 import client from './client'
 import type { ApiResponse } from '../types/api'
 import type { TaskRecord } from '../types/taskRecord'
+import { getApiErrorMessage } from '../utils/error'
 
 /* ── 异步任务参数构建（原 taskParams.ts） ── */
 
 export interface StartTaskOptions {
-  forceRecover?: boolean
   forceRegenerate?: boolean
 }
 
 export function buildAsyncTaskQuery(options: StartTaskOptions = {}): string {
   const query = new URLSearchParams({ async_mode: 'true' })
-  if (options.forceRecover) {
-    query.set('force_recover', 'true')
-  }
   if (options.forceRegenerate) {
     query.set('force_regenerate', 'true')
   }
@@ -80,11 +77,6 @@ export async function retryTaskRecord(taskId: string): Promise<TaskRecord> {
   return resp.data.data!
 }
 
-function toErrorMessage(error: unknown, fallback: string): string {
-  const err = error as { response?: { data?: { detail?: string; message?: string } }; message?: string }
-  return err?.response?.data?.detail ?? err?.response?.data?.message ?? err?.message ?? fallback
-}
-
 /** 轮询等待后台任务完成 */
 export async function waitForTask(
   taskId: string,
@@ -103,7 +95,7 @@ export async function waitForTask(
       consecutiveErrors = 0
     } catch (error) {
       consecutiveErrors += 1
-      const message = toErrorMessage(error, '任务状态查询失败')
+      const message = getApiErrorMessage(error, '任务状态查询失败')
 
       if (Date.now() - startedAt > timeoutMs) {
         throw new Error('任务等待超时，请稍后重试')

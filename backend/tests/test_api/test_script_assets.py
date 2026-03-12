@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import pytest
 from httpx import AsyncClient
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.models import PanelEffectiveBinding
 
 
 @pytest.mark.asyncio
@@ -268,3 +271,301 @@ async def test_episode_scoped_script_entity_binding_should_apply_only_to_target_
 
     assert payload_2['locations'] == []
     assert payload_2['effective_reference_image_url'] is None
+
+
+@pytest.mark.asyncio
+async def test_create_script_entity_should_reject_foreign_project_asset_binding(client: AsyncClient):
+    create_project_a = await client.post('/api/projects', json={'name': '剧本绑定项目A'})
+    create_project_b = await client.post('/api/projects', json={'name': '剧本绑定项目B'})
+    assert create_project_a.status_code == 200 and create_project_b.status_code == 200
+    project_a_id = create_project_a.json()['data']['id']
+    project_b_id = create_project_b.json()['data']['id']
+
+    create_character_asset = await client.post(
+        '/api/asset-hub/characters',
+        json={
+            'name': '项目B角色资产',
+            'project_id': project_b_id,
+            'prompt_template': 'project b character prompt',
+        },
+    )
+    assert create_character_asset.status_code == 200
+    character_asset_id = create_character_asset.json()['data']['id']
+
+    create_entity = await client.post(
+        f'/api/projects/{project_a_id}/script-assets/entities',
+        json={
+            'entity_type': 'character',
+            'name': '项目A角色实体',
+            'bindings': [
+                {
+                    'asset_type': 'character',
+                    'asset_id': character_asset_id,
+                    'asset_name': '项目B角色资产',
+                    'is_primary': True,
+                }
+            ],
+        },
+    )
+    assert create_entity.status_code == 400
+    assert create_entity.json()['detail'] == f'包含不属于当前项目的角色资产ID: {character_asset_id}'
+
+
+@pytest.mark.asyncio
+async def test_replace_panel_asset_overrides_should_reject_missing_asset_id(client: AsyncClient):
+    create_project = await client.post('/api/projects', json={'name': '分镜覆盖资产校验测试'})
+    assert create_project.status_code == 200
+    project_id = create_project.json()['data']['id']
+
+    create_episode = await client.post(
+        f'/api/projects/{project_id}/episodes',
+        json={'title': '第1集', 'script_text': '测试分镜覆盖。'},
+    )
+    assert create_episode.status_code == 200
+    episode_id = create_episode.json()['data']['id']
+
+    create_panel = await client.post(
+        f'/api/episodes/{episode_id}/panels',
+        json={'title': '分镜一', 'script_text': '测试分镜', 'duration_seconds': 4},
+    )
+    assert create_panel.status_code == 200
+    panel_id = create_panel.json()['data']['id']
+
+    create_entity = await client.post(
+        f'/api/projects/{project_id}/script-assets/entities',
+        json={
+            'entity_type': 'speaker',
+            'name': '旁白实体',
+        },
+    )
+    assert create_entity.status_code == 200
+    entity_id = create_entity.json()['data']['id']
+
+    replace_override = await client.put(
+        f'/api/panels/{panel_id}/asset-overrides',
+        json={
+            'overrides': [
+                {
+                    'entity_id': entity_id,
+                    'asset_type': 'voice',
+                    'asset_id': 'not-exists-voice',
+                    'asset_name': '不存在的语音',
+                    'is_primary': True,
+                }
+            ]
+        },
+    )
+    assert replace_override.status_code == 400
+    assert replace_override.json()['detail'] == '包含不存在的语音资产ID: not-exists-voice'
+
+
+async def _create_character_default_voice_context(client: AsyncClient) -> dict[str, str]:
+    create_project = await client.post('/api/projects', json={'name': '角色默认语音生效测试'})
+    assert create_project.status_code == 200
+    project_id = create_project.json()['data']['id']
+
+    create_episode = await client.post(
+        f'/api/projects/{project_id}/episodes',
+        json={'title': '第1集', 'script_text': '阿青在古城中开口说话。'},
+    )
+    assert create_episode.status_code == 200
+    episode_id = create_episode.json()['data']['id']
+
+    create_panel = await client.post(
+        f'/api/episodes/{episode_id}/panels',
+        json={
+            'title': '阿青对白',
+            'script_text': '阿青在古城中开口说话。',
+            'visual_prompt': 'ancient city dialogue',
+            'duration_seconds': 5,
+        },
+    )
+    assert create_panel.status_code == 200
+    panel_id = create_panel.json()['data']['id']
+
+    voice_resp = await client.post(
+        '/api/asset-hub/voices',
+        json={
+            'name': '阿青默认声线',
+            'project_id': project_id,
+            'provider': 'edge-tts',
+            'voice_code': 'zh-CN-XiaoxiaoNeural',
+        },
+    )
+    assert voice_resp.status_code == 200
+    voice_id = voice_resp.json()['data']['id']
+
+    character_resp = await client.post(
+        '/api/asset-hub/characters',
+        json={
+            'name': '阿青立绘',
+            'project_id': project_id,
+            'prompt_template': 'young swordswoman, white robe',
+            'default_voice_id': voice_id,
+        },
+    )
+    assert character_resp.status_code == 200
+    character_asset_id = character_resp.json()['data']['id']
+
+    entity_resp = await client.post(
+        f'/api/projects/{project_id}/script-assets/entities',
+        json={
+            'entity_type': 'character',
+            'name': '阿青',
+            'bindings': [
+                {
+                    'asset_type': 'character',
+                    'asset_id': character_asset_id,
+                    'asset_name': '阿青立绘',
+                    'is_primary': True,
+                    'priority': 0,
+                }
+            ],
+        },
+    )
+    assert entity_resp.status_code == 200
+
+    return {
+        'project_id': project_id,
+        'episode_id': episode_id,
+        'panel_id': panel_id,
+        'voice_id': voice_id,
+        'character_asset_id': character_asset_id,
+    }
+
+
+@pytest.mark.asyncio
+async def test_character_default_voice_should_become_effective_voice(client: AsyncClient):
+    context = await _create_character_default_voice_context(client)
+
+    effective = await client.get(f"/api/panels/{context['panel_id']}/effective-bindings")
+    assert effective.status_code == 200
+    data = effective.json()['data']
+    assert data['effective_voice']['voice_id'] == context['voice_id']
+    assert data['effective_voice']['source_layer'] == 'character_default'
+    assert data['effective_voice']['entity_id'] is None
+    assert data['effective_voice']['entity_name'] == '阿青'
+
+
+@pytest.mark.asyncio
+async def test_explicit_speaker_voice_binding_should_override_character_default_voice(client: AsyncClient):
+    context = await _create_character_default_voice_context(client)
+
+    override_voice_resp = await client.post(
+        '/api/asset-hub/voices',
+        json={
+            'name': '阿青旁白声线',
+            'project_id': context['project_id'],
+            'provider': 'edge-tts',
+            'voice_code': 'zh-CN-YunxiNeural',
+        },
+    )
+    assert override_voice_resp.status_code == 200
+    override_voice_id = override_voice_resp.json()['data']['id']
+
+    speaker_resp = await client.post(
+        f"/api/projects/{context['project_id']}/script-assets/entities",
+        json={
+            'entity_type': 'speaker',
+            'name': '阿青',
+            'bindings': [
+                {
+                    'asset_type': 'voice',
+                    'asset_id': override_voice_id,
+                    'asset_name': '阿青旁白声线',
+                    'is_primary': True,
+                    'priority': 0,
+                }
+            ],
+        },
+    )
+    assert speaker_resp.status_code == 200
+    speaker_id = speaker_resp.json()['data']['id']
+
+    effective = await client.get(f"/api/panels/{context['panel_id']}/effective-bindings")
+    assert effective.status_code == 200
+    data = effective.json()['data']
+    assert data['effective_voice']['voice_id'] == override_voice_id
+    assert data['effective_voice']['source_layer'] == 'script'
+    assert data['effective_voice']['entity_id'] == speaker_id
+
+
+@pytest.mark.asyncio
+async def test_update_character_default_voice_should_refresh_effective_binding_snapshot(client: AsyncClient):
+    context = await _create_character_default_voice_context(client)
+
+    effective_before = await client.get(f"/api/panels/{context['panel_id']}/effective-bindings")
+    assert effective_before.status_code == 200
+    assert effective_before.json()['data']['effective_voice']['voice_id'] == context['voice_id']
+
+    voice_resp = await client.post(
+        '/api/asset-hub/voices',
+        json={
+            'name': '阿青新默认声线',
+            'project_id': context['project_id'],
+            'provider': 'edge-tts',
+            'voice_code': 'zh-CN-YunjianNeural',
+        },
+    )
+    assert voice_resp.status_code == 200
+    next_voice_id = voice_resp.json()['data']['id']
+
+    update_character = await client.put(
+        f"/api/asset-hub/characters/{context['character_asset_id']}",
+        json={'default_voice_id': next_voice_id},
+    )
+    assert update_character.status_code == 200
+
+    effective_after = await client.get(f"/api/panels/{context['panel_id']}/effective-bindings")
+    assert effective_after.status_code == 200
+    assert effective_after.json()['data']['effective_voice']['voice_id'] == next_voice_id
+    assert effective_after.json()['data']['effective_voice']['source_layer'] == 'character_default'
+
+
+@pytest.mark.asyncio
+async def test_delete_character_default_voice_should_clear_effective_voice(client: AsyncClient):
+    context = await _create_character_default_voice_context(client)
+
+    effective_before = await client.get(f"/api/panels/{context['panel_id']}/effective-bindings")
+    assert effective_before.status_code == 200
+    assert effective_before.json()['data']['effective_voice']['voice_id'] == context['voice_id']
+
+    delete_voice = await client.delete(f"/api/asset-hub/voices/{context['voice_id']}")
+    assert delete_voice.status_code == 200
+
+    characters_resp = await client.get(
+        '/api/asset-hub/characters',
+        params={'project_id': context['project_id'], 'scope': 'project'},
+    )
+    assert characters_resp.status_code == 200
+    character_map = {item['id']: item for item in characters_resp.json()['data']}
+    assert character_map[context['character_asset_id']]['default_voice_id'] is None
+
+    effective_after = await client.get(f"/api/panels/{context['panel_id']}/effective-bindings")
+    assert effective_after.status_code == 200
+    assert effective_after.json()['data']['effective_voice'] is None
+
+
+@pytest.mark.asyncio
+async def test_get_panel_should_refresh_stale_effective_binding_snapshot(
+    client: AsyncClient,
+    db_session: AsyncSession,
+):
+    context = await _create_character_default_voice_context(client)
+
+    compiled = await client.get(f"/api/panels/{context['panel_id']}/effective-bindings")
+    assert compiled.status_code == 200
+
+    row = await db_session.get(PanelEffectiveBinding, context['panel_id'])
+    assert row is not None
+    row.compiler_version = 'stale-version'
+    await db_session.commit()
+
+    detail = await client.get(f"/api/panels/{context['panel_id']}")
+    assert detail.status_code == 200
+    assert detail.json()['data']['effective_binding']['effective_voice']['voice_id'] == context['voice_id']
+
+    db_session.expire_all()
+    refreshed = await db_session.get(PanelEffectiveBinding, context['panel_id'])
+    assert refreshed is not None
+    assert refreshed.compiler_version == 'v2'

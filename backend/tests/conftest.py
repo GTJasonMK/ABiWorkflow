@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import os
 
-import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -15,12 +14,6 @@ TEST_DATABASE_URL = f"sqlite+aiosqlite:///./test_{os.getpid()}.db"
 test_engine = create_async_engine(TEST_DATABASE_URL, echo=False)
 test_session_factory = async_sessionmaker(test_engine, class_=AsyncSession, expire_on_commit=False)
 
-
-@pytest.fixture(autouse=True)
-def disable_ggk_auto_import(monkeypatch: pytest.MonkeyPatch):
-    """测试环境关闭自动导入，避免依赖本机外部项目状态。"""
-    monkeypatch.setenv("ABI_DISABLE_GGK_AUTO_IMPORT", "1")
-    yield
 
 
 @pytest_asyncio.fixture(autouse=True)

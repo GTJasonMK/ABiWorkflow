@@ -1,5 +1,5 @@
 import { KeyOutlined, LinkOutlined } from '@ant-design/icons'
-import { Collapse, Form, Input } from 'antd'
+import { Collapse, Form, Input, Select } from 'antd'
 import { CODE_INPUT_STYLE } from '../../constants'
 
 export default function LlmTab() {
@@ -7,17 +7,30 @@ export default function LlmTab() {
     <div className="np-settings-section">
       <div className="np-dashboard-grid">
         <Form.Item
+          label="Provider"
+          name="llm_provider"
+          rules={[{ required: true, message: '请选择 LLM Provider' }]}
+          tooltip="显式指定 LLM API 协议，不再通过模型名猜测"
+        >
+          <Select
+            options={[
+              { label: 'OpenAI 兼容（Chat Completions）', value: 'openai' },
+              { label: 'Anthropic（Messages）', value: 'anthropic' },
+            ]}
+          />
+        </Form.Item>
+        <Form.Item
           label="模型"
           name="llm_model"
           rules={[{ required: true, message: '请输入模型名称' }]}
-          tooltip="根据模型名自动检测 API 格式：含 claude 使用 Anthropic API，其余使用 OpenAI 兼容 API"
+          tooltip="模型名称由 Provider 决定协议；例如 gpt-4o / grok-4 / claude-sonnet 等"
         >
           <Input placeholder="gpt-4o / claude-sonnet-4-20250514 / deepseek-chat" />
         </Form.Item>
         <Form.Item
           label="Base URL"
           name="llm_base_url"
-          tooltip="留空使用官方默认地址；可填写 DeepSeek、GGK 等第三方兼容服务地址"
+          tooltip="留空使用默认地址；OpenAI provider 需要以 /v1 结尾（例如 https://glk.jia4u.de/v1），Anthropic provider 不应包含 /v1"
         >
           <Input
             prefix={<LinkOutlined />}

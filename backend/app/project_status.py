@@ -23,6 +23,7 @@ PROJECT_PARSE_ALLOWED_FROM: Final = (
     PROJECT_STATUS_COMPLETED,
 )
 PROJECT_GENERATE_ALLOWED_FROM: Final = (
+    PROJECT_STATUS_DRAFT,
     PROJECT_STATUS_PARSED,
     PROJECT_STATUS_FAILED,
     PROJECT_STATUS_COMPLETED,
@@ -56,7 +57,7 @@ def resolve_parse_recover_status(has_structured_data: bool) -> str:
     return PROJECT_STATUS_PARSED if has_structured_data else PROJECT_STATUS_DRAFT
 
 
-def resolve_post_scene_generation_status(previous_status: str) -> str:
+def resolve_post_panel_generation_status(previous_status: str) -> str:
     return (
         previous_status
         if previous_status in PROJECT_RESTORE_TO_PARSED_OR_COMPLETED
@@ -95,15 +96,15 @@ def resolve_generation_completion_status(
     scope_all_done: bool,
 ) -> str:
     if scoped_to_episode:
-        return resolve_post_scene_generation_status(previous_status)
+        return resolve_post_panel_generation_status(previous_status)
     if scope_all_done:
-        return resolve_post_scene_generation_status(previous_status)
+        return resolve_post_panel_generation_status(previous_status)
     return PROJECT_STATUS_FAILED
 
 
 def resolve_generation_failure_status(previous_status: str, *, scoped_to_episode: bool) -> str:
     if scoped_to_episode:
-        return resolve_post_scene_generation_status(previous_status)
+        return resolve_post_panel_generation_status(previous_status)
     return (
         PROJECT_STATUS_FAILED
         if previous_status != PROJECT_STATUS_COMPLETED

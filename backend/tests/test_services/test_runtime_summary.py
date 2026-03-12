@@ -12,7 +12,6 @@ def test_build_runtime_summary_should_return_structured_sections():
     assert "model" in summary["llm"]
     assert "celery_worker_online" in summary["queue"]
     assert "queue_mode" in summary["queue"]
-    assert "fallback_active" in summary["queue"]
     assert "http_provider" in summary["video"]
     assert "ggk_provider" in summary["video"]
     assert "project_asset_publish_global_default" in summary["video"]

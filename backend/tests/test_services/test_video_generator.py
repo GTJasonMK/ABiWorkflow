@@ -6,7 +6,8 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import Character, Project, Scene, SceneCharacter, VideoClip
+from app.episode_status import EPISODE_STATUS_DRAFT
+from app.models import Episode, Panel, Project, VideoClip
 from app.services.video_generator import VideoGeneratorService
 from app.video_providers.base import VideoGenerateRequest, VideoProvider, VideoTaskStatus
 
@@ -43,57 +44,52 @@ class FakeVideoProvider(VideoProvider):
         return output_path
 
 
-async def _create_scene_fixture(
+async def _create_panel_fixture(
     db_session: AsyncSession,
     tmp_path: Path,
     *,
     duration_seconds: float,
     reference_image_url: str | None = "https://example.com/ref.png",
-    scene_setting: str | None = None,
     with_old_clip: bool = False,
-) -> Scene:
+) -> Panel:
     project = Project(name="测试项目", status="parsed")
     db_session.add(project)
     await db_session.flush()
 
-    character: Character | None = None
-    if reference_image_url is not None:
-        character = Character(
-            project_id=project.id,
-            name="主角",
-            appearance="黑发",
-            personality="冷静",
-            costume="风衣",
-            reference_image_url=reference_image_url,
-        )
-        db_session.add(character)
-        await db_session.flush()
-
-    scene = Scene(
+    episode = Episode(
         project_id=project.id,
-        sequence_order=0,
-        title="第一场",
-        video_prompt="A cinematic scene with the lead character",
-        duration_seconds=duration_seconds,
-        status="pending",
-        setting=scene_setting,
+        episode_order=0,
+        title="第1集",
+        status=EPISODE_STATUS_DRAFT,
     )
-    db_session.add(scene)
+    db_session.add(episode)
     await db_session.flush()
 
-    if character is not None:
-        db_session.add(SceneCharacter(scene_id=scene.id, character_id=character.id, action="走向镜头"))
+    panel = Panel(
+        project_id=project.id,
+        episode_id=episode.id,
+        panel_order=0,
+        title="第一镜",
+        script_text="主角走向镜头",
+        visual_prompt="A cinematic scene with the lead character",
+        reference_image_url=reference_image_url,
+        duration_seconds=duration_seconds,
+        status="pending",
+    )
+    db_session.add(panel)
+    await db_session.flush()
+
     if with_old_clip:
         db_session.add(
             VideoClip(
-                scene_id=scene.id,
+                panel_id=panel.id,
                 clip_order=0,
                 file_path=str(tmp_path / "old.mp4"),
                 status="completed",
             )
         )
     await db_session.commit()
-    return scene
+    return panel
 
 
 def _build_service(tmp_path: Path, provider: VideoProvider | None = None) -> VideoGeneratorService:
@@ -106,11 +102,11 @@ def _build_service(tmp_path: Path, provider: VideoProvider | None = None) -> Vid
 
 
 @pytest.mark.asyncio
-async def test_generate_scene_should_clear_old_clips_and_keep_consistency_data(
+async def test_generate_panel_should_clear_old_clips_and_keep_consistency_data(
     db_session: AsyncSession,
     tmp_path: Path,
 ):
-    scene = await _create_scene_fixture(
+    panel = await _create_panel_fixture(
         db_session,
         tmp_path,
         duration_seconds=12.0,
@@ -119,25 +115,24 @@ async def test_generate_scene_should_clear_old_clips_and_keep_consistency_data(
     provider = FakeVideoProvider()
     service = _build_service(tmp_path, provider)
 
-    await service.generate_scene(scene, db_session)
+    await service.generate_panel(panel, db_session)
     await db_session.commit()
 
     clips = (
         await db_session.execute(
-            select(VideoClip).where(VideoClip.scene_id == scene.id).order_by(VideoClip.clip_order)
+            select(VideoClip).where(VideoClip.panel_id == panel.id).order_by(VideoClip.clip_order)
         )
     ).scalars().all()
     assert len(clips) == 3
-    assert all(c.status == "completed" for c in clips)
-    assert all(c.file_path and Path(c.file_path).exists() for c in clips)
+    assert all(item.status == "completed" for item in clips)
+    assert all(item.file_path and Path(item.file_path).exists() for item in clips)
 
-    # 12 秒场景按 provider 最大 5 秒拆分后，应为 3 段。
     assert len(provider.requests) == 3
     assert all(req.reference_image_url == "https://example.com/ref.png" for req in provider.requests)
     assert len({req.seed for req in provider.requests}) == 3
 
-    refreshed_scene = (await db_session.execute(select(Scene).where(Scene.id == scene.id))).scalar_one()
-    assert refreshed_scene.status == "generated"
+    refreshed_panel = (await db_session.execute(select(Panel).where(Panel.id == panel.id))).scalar_one()
+    assert refreshed_panel.status == "completed"
 
 
 @pytest.mark.asyncio
@@ -146,18 +141,17 @@ async def test_generate_candidates_should_append_new_candidates_and_auto_select_
     tmp_path: Path,
 ):
     fallback_reference = "https://example.com/scene-ref.png"
-    scene = await _create_scene_fixture(
+    panel = await _create_panel_fixture(
         db_session,
         tmp_path,
         duration_seconds=9.0,
-        reference_image_url=None,
-        scene_setting=fallback_reference,
+        reference_image_url=fallback_reference,
     )
     provider = FakeVideoProvider()
     service = _build_service(tmp_path, provider)
 
-    first_batch = await service.generate_candidates(scene, 2, db_session)
-    second_batch = await service.generate_candidates(scene, 1, db_session)
+    first_batch = await service.generate_candidates(panel, 2, db_session)
+    second_batch = await service.generate_candidates(panel, 1, db_session)
     await db_session.commit()
 
     assert len(first_batch) == 4
@@ -169,7 +163,7 @@ async def test_generate_candidates_should_append_new_candidates_and_auto_select_
     clips = (
         await db_session.execute(
             select(VideoClip)
-            .where(VideoClip.scene_id == scene.id)
+            .where(VideoClip.panel_id == panel.id)
             .order_by(VideoClip.candidate_index, VideoClip.clip_order)
         )
     ).scalars().all()

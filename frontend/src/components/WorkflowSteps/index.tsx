@@ -1,33 +1,21 @@
 import { useMemo } from 'react'
 import { Steps } from 'antd'
-import { useParams, useNavigate, useLocation, useSearchParams } from 'react-router-dom'
-import { WORKFLOW_STEPS, buildWorkflowStepPath, getStepStatusesByIndex } from '../../utils/workflow'
+import { useParams, useNavigate, useLocation } from 'react-router-dom'
+import { WORKFLOW_STEPS, buildWorkflowStepPath, getStepStatusesByIndex, resolveWorkflowStepFromPath } from '../../utils/workflow'
 
 /**
  * 工作流步骤导航条。
  *
  * 嵌入 PageHeader 的 navigation 插槽，与返回按钮同行展示。
  */
-interface WorkflowStepsProps {
-  /**
-   * 可选：页面可注入“已校验的分集上下文”。
-   * 传 null 表示强制按无分集上下文处理，禁用非 script 步骤。
-   * 传 undefined 表示沿用 URL 中的 episodeId。
-   */
-  episodeIdOverride?: string | null
-}
-
-export default function WorkflowSteps({ episodeIdOverride }: WorkflowStepsProps) {
-  const { id: projectId } = useParams<{ id: string }>()
+export default function WorkflowSteps() {
+  const { id: projectId, episodeId } = useParams<{ id: string; episodeId?: string }>()
   const navigate = useNavigate()
   const location = useLocation()
-  const [searchParams] = useSearchParams()
-  const urlEpisodeId = (searchParams.get('episodeId') || '').trim() || null
-  const episodeId = episodeIdOverride === undefined ? urlEpisodeId : episodeIdOverride
 
   // 从 URL 推断当前步骤索引
-  const pathSegment = location.pathname.split('/').pop() ?? ''
-  const currentIndex = WORKFLOW_STEPS.findIndex((step) => step.key === pathSegment)
+  const currentKey = resolveWorkflowStepFromPath(location.pathname)
+  const currentIndex = WORKFLOW_STEPS.findIndex((step) => step.key === currentKey)
   const activeIndex = currentIndex >= 0 ? currentIndex : 0
 
   const stepStatuses = getStepStatusesByIndex(activeIndex)

@@ -4,14 +4,12 @@ from types import SimpleNamespace
 
 import pytest
 from httpx import AsyncClient
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 import app.api.projects_workflow as workflow_api
 import app.tasks.compose_tasks as compose_tasks
 import app.tasks.import_tasks as import_tasks
 from app.models import Episode, Panel, Project, TaskRecord
-from app.schemas.common import ApiResponse
 
 
 @pytest.mark.asyncio
@@ -38,59 +36,77 @@ async def test_marker_split_should_detect_episode_markers(
     )
     assert response.status_code == 200
     payload = response.json()["data"]
-    assert payload["method"] in {"markers", "llm_fallback", "heuristic"}
+    assert payload["method"] == "markers"
     assert len(payload["episodes"]) >= 2
     assert payload["episodes"][0]["title"]
     assert payload["episodes"][0]["script_text"]
 
 
 @pytest.mark.asyncio
-async def test_import_commit_should_merge_script_and_delegate_parse(
+async def test_llm_split_sync_should_fail_when_llm_returns_no_valid_episodes(
     client: AsyncClient,
     db_session: AsyncSession,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    project = Project(name="导入落库项目", status="draft")
+    project = Project(name="同步 AI 分集失败测试", status="draft")
     db_session.add(project)
     await db_session.commit()
 
-    async def fake_parse_script(*_args, **_kwargs):
-        return ApiResponse(data={"character_count": 2, "panel_count": 3, "episode_count": 1})
+    async def fake_split(_content: str):
+        raise ValueError("LLM 未返回有效分集结果")
 
-    monkeypatch.setattr(workflow_api, "parse_script", fake_parse_script)
+    monkeypatch.setattr(workflow_api, "split_with_llm", fake_split)
 
     response = await client.post(
-        f"/api/projects/{project.id}/import/commit",
-        json={
+        f"/api/projects/{project.id}/import/llm-split",
+        params={"async_mode": "false"},
+        json={"content": "第1集：开场\n" + ("测试内容" * 40)},
+    )
+    assert response.status_code == 500
+    assert "LLM 未返回有效分集结果" in response.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_llm_split_async_should_fallback_to_sync_when_worker_unavailable(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    project = Project(name="异步 AI 分集自动降级测试", status="draft")
+    db_session.add(project)
+    await db_session.commit()
+
+    monkeypatch.setattr("app.tasks.health.has_celery_worker", lambda: False)
+    monkeypatch.setattr("app.api.task_mode.has_celery_worker", lambda: False)
+
+    async def fake_split(_content: str):
+        return {
+            "method": "llm",
+            "confidence": 0.82,
             "episodes": [
                 {
-                    "title": "第1集 开端",
-                    "summary": "故事开场",
-                    "script_text": "主角来到新城市，准备开始新生活。",
-                },
-                {
-                    "title": "第2集 冲突",
-                    "summary": "矛盾升级",
-                    "script_text": "竞争对手出现，双方冲突逐渐升级。",
-                },
+                    "title": "第1集 开场",
+                    "summary": "故事开始",
+                    "script_text": "主角来到城市，故事由此展开。",
+                    "order": 0,
+                }
             ],
-        },
+        }
+
+    monkeypatch.setattr(workflow_api, "split_with_llm", fake_split)
+
+    response = await client.post(
+        f"/api/projects/{project.id}/import/llm-split",
+        params={"async_mode": "true"},
+        json={"content": "第1集：开场\n" + ("测试内容" * 40)},
     )
+
     assert response.status_code == 200
-    data = response.json()["data"]
-    assert data["episode_count"] == 2
-    assert data["script_char_count"] > 0
-    assert data["parse"]["character_count"] == 2
-    assert data["parse"]["panel_count"] == 3
-
-    refreshed = (await db_session.execute(select(Project).where(Project.id == project.id))).scalar_one()
-    assert "第1集 开端" in (refreshed.script_text or "")
-    assert "第2集 冲突" in (refreshed.script_text or "")
-
-    episodes = (await db_session.execute(select(Episode).where(Episode.project_id == project.id))).scalars().all()
-    panels = (await db_session.execute(select(Panel).where(Panel.project_id == project.id))).scalars().all()
-    assert len(episodes) == 0
-    assert len(panels) == 0
+    payload = response.json()["data"]
+    assert payload["method"] == "llm"
+    assert payload["confidence"] == 0.82
+    assert len(payload["episodes"]) == 1
+    assert payload["episodes"][0]["title"] == "第1集 开场"
 
 
 @pytest.mark.asyncio
@@ -232,3 +248,187 @@ async def test_retry_compose_task_should_preserve_episode_scope(
     assert payload["episode_id"] == episode.id
     assert captured["project_id"] == project.id
     assert captured["episode_id"] == episode.id
+
+
+@pytest.mark.asyncio
+async def test_retry_panel_video_provider_task_should_resubmit_and_replace_active_task(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    project = Project(name="分镜 provider 重试测试", status="parsed")
+    db_session.add(project)
+    await db_session.flush()
+
+    episode = Episode(project_id=project.id, episode_order=0, title="第1集")
+    db_session.add(episode)
+    await db_session.flush()
+
+    panel = Panel(
+        project_id=project.id,
+        episode_id=episode.id,
+        panel_order=0,
+        title="分镜一",
+        visual_prompt="cinematic retry",
+        status="failed",
+        video_url="/media/videos/old-video.mp4",
+        lipsync_video_url="/media/videos/old-lipsync.mp4",
+        video_provider_task_id="provider-video-old",
+        lipsync_provider_task_id="provider-lipsync-old",
+        error_message="old failed",
+    )
+    db_session.add(panel)
+    await db_session.flush()
+
+    task = TaskRecord(
+        task_type="video",
+        target_type="panel",
+        target_id=panel.id,
+        project_id=project.id,
+        episode_id=episode.id,
+        panel_id=panel.id,
+        source_task_id="provider-video-old",
+        status="failed",
+        payload_json=(
+            '{"provider_key":"mock-video","request":{"prompt":"cinematic retry","seconds":5},'
+            '"usage_type":"panel_video_generate","unit_price":0.25,"model_name":"demo-video-v1"}'
+        ),
+        message="旧视频任务失败",
+    )
+    db_session.add(task)
+    await db_session.commit()
+
+    captured: dict[str, object] = {}
+
+    async def fake_submit_provider_task(db, *, provider_key: str, payload: dict):  # noqa: ANN001
+        captured["provider_key"] = provider_key
+        captured["payload"] = payload
+        return {"task_id": "provider-video-retry-1", "status": "submitted"}
+
+    async def fake_record_usage_cost(db, **kwargs):  # noqa: ANN001
+        captured["usage_cost"] = kwargs
+        return None
+
+    monkeypatch.setattr("app.api.tasks.submit_provider_task", fake_submit_provider_task)
+    monkeypatch.setattr("app.api.tasks.record_usage_cost", fake_record_usage_cost)
+
+    response = await client.post(f"/api/tasks/{task.id}/retry")
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["task_type"] == "video"
+    assert data["status"] == "running"
+    assert data["source_task_id"] == "provider-video-retry-1"
+    assert data["payload"]["retry_from"] == task.id
+    assert data["payload"]["provider_key"] == "mock-video"
+    assert data["payload"]["unit_price"] == 0.25
+    assert data["payload"]["model_name"] == "demo-video-v1"
+
+    await db_session.refresh(panel)
+    assert panel.video_provider_task_id == "provider-video-retry-1"
+    assert panel.video_url is None
+    assert panel.lipsync_video_url is None
+    assert panel.lipsync_provider_task_id is None
+    assert panel.status == "processing"
+    assert panel.error_message is None
+
+    assert captured["provider_key"] == "mock-video"
+    assert captured["payload"] == {"prompt": "cinematic retry", "seconds": 5}
+    assert isinstance(captured.get("usage_cost"), dict)
+    assert captured["usage_cost"]["provider_type"] == "video"
+    assert captured["usage_cost"]["provider_name"] == "mock-video"
+    assert captured["usage_cost"]["usage_type"] == "panel_video_generate"
+    assert captured["usage_cost"]["unit_price"] == 0.25
+    assert captured["usage_cost"]["task_id"] == data["id"]
+
+
+@pytest.mark.asyncio
+async def test_retry_panel_provider_task_should_reject_when_panel_active_task_changed(
+    client: AsyncClient,
+    db_session: AsyncSession,
+):
+    project = Project(name="分镜 provider 任务变更保护测试", status="parsed")
+    db_session.add(project)
+    await db_session.flush()
+
+    episode = Episode(project_id=project.id, episode_order=0, title="第1集")
+    db_session.add(episode)
+    await db_session.flush()
+
+    panel = Panel(
+        project_id=project.id,
+        episode_id=episode.id,
+        panel_order=0,
+        title="分镜一",
+        visual_prompt="cinematic retry",
+        status="processing",
+        video_provider_task_id="provider-video-newer",
+    )
+    db_session.add(panel)
+    await db_session.flush()
+
+    task = TaskRecord(
+        task_type="video",
+        target_type="panel",
+        target_id=panel.id,
+        project_id=project.id,
+        episode_id=episode.id,
+        panel_id=panel.id,
+        source_task_id="provider-video-old",
+        status="failed",
+        payload_json='{"provider_key":"mock-video","request":{"prompt":"old"}}',
+        message="旧视频任务失败",
+    )
+    db_session.add(task)
+    await db_session.commit()
+
+    response = await client.post(f"/api/tasks/{task.id}/retry")
+    assert response.status_code == 409
+    assert response.json()["detail"] == "当前分镜的视频任务已变更，请回到对应分镜页面重新提交"
+
+
+@pytest.mark.asyncio
+async def test_cancel_running_panel_provider_task_should_reject_fake_celery_cancel(
+    client: AsyncClient,
+    db_session: AsyncSession,
+):
+    project = Project(name="分镜 provider 取消保护测试", status="parsed")
+    db_session.add(project)
+    await db_session.flush()
+
+    episode = Episode(project_id=project.id, episode_order=0, title="第1集")
+    db_session.add(episode)
+    await db_session.flush()
+
+    panel = Panel(
+        project_id=project.id,
+        episode_id=episode.id,
+        panel_order=0,
+        title="分镜一",
+        visual_prompt="cancel guard",
+        status="processing",
+        video_provider_task_id="provider-video-running",
+    )
+    db_session.add(panel)
+    await db_session.flush()
+
+    task = TaskRecord(
+        task_type="video",
+        target_type="panel",
+        target_id=panel.id,
+        project_id=project.id,
+        episode_id=episode.id,
+        panel_id=panel.id,
+        source_task_id="provider-video-running",
+        status="running",
+        payload_json='{"provider_key":"mock-video","request":{"prompt":"cancel guard"}}',
+        message="视频任务运行中",
+    )
+    db_session.add(task)
+    await db_session.commit()
+
+    response = await client.post(f"/api/tasks/{task.id}/cancel")
+    assert response.status_code == 400
+    assert response.json()["detail"] == "外部 provider 任务暂不支持从任务中心取消，请回到 provider 侧处理或等待完成"
+
+    await db_session.refresh(task)
+    assert task.status == "running"

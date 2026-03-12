@@ -11,7 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
-from app.models import Project, Scene
+from app.models import Panel, Project, TaskRecord, VideoClip
 from app.tasks.compose_tasks import compose_video_task
 from app.tasks.generate_tasks import generate_videos_task
 from app.tasks.parse_tasks import _run_parse, parse_script_task
@@ -68,6 +68,32 @@ async def test_parse_async_should_queue_task(
 
 
 @pytest.mark.asyncio
+async def test_llm_split_async_should_queue_task(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    _force_worker_available(monkeypatch)
+    project = Project(name="异步 AI 分集测试", status="draft")
+    db_session.add(project)
+    await db_session.commit()
+
+    fake_dispatcher = _FakeTaskDispatcher("split-task-1")
+    monkeypatch.setattr("app.tasks.import_tasks.split_episodes_llm_task", fake_dispatcher)
+
+    content = "第1集：开场\n" + ("测试内容" * 40)
+    response = await client.post(
+        f"/api/projects/{project.id}/import/llm-split",
+        params={"async_mode": "true"},
+        json={"content": content},
+    )
+    assert response.status_code == 200
+    assert response.json()["data"]["task_id"] == "split-task-1"
+    assert len(fake_dispatcher.calls) == 1
+    assert fake_dispatcher.calls[0][0] == (project.id, content)
+
+
+@pytest.mark.asyncio
 async def test_generate_async_should_queue_task(
     client: AsyncClient,
     db_session: AsyncSession,
@@ -78,16 +104,6 @@ async def test_generate_async_should_queue_task(
     db_session.add(project)
     await db_session.flush()
 
-    scene = Scene(
-        project_id=project.id,
-        sequence_order=0,
-        title="场景一",
-        video_prompt="A cinematic shot",
-        duration_seconds=5.0,
-        status="pending",
-    )
-    db_session.add(scene)
-    await db_session.flush()
     await seed_single_panel(
         db_session,
         project.id,
@@ -120,16 +136,6 @@ async def test_generate_async_should_not_queue_when_no_scene_needs_regeneration(
     db_session.add(project)
     await db_session.flush()
 
-    scene = Scene(
-        project_id=project.id,
-        sequence_order=0,
-        title="场景一",
-        video_prompt="A cinematic shot",
-        duration_seconds=5.0,
-        status="generated",
-    )
-    db_session.add(scene)
-    await db_session.flush()
     await seed_single_panel(
         db_session,
         project.id,
@@ -139,6 +145,16 @@ async def test_generate_async_should_not_queue_when_no_scene_needs_regeneration(
         status="completed",
         video_url="/media/videos/ready.mp4",
     )
+    panel = (await db_session.execute(select(Panel).where(Panel.project_id == project.id))).scalar_one()
+    db_session.add(VideoClip(
+        panel_id=panel.id,
+        clip_order=0,
+        candidate_index=0,
+        is_selected=True,
+        file_path=f"./outputs/videos/{panel.id}_0.mp4",
+        status="completed",
+        duration_seconds=panel.duration_seconds,
+    ))
     await db_session.commit()
 
     fake_dispatcher = _FakeTaskDispatcher("gen-task-unused")
@@ -168,16 +184,6 @@ async def test_compose_async_should_queue_task(
     db_session.add(project)
     await db_session.flush()
 
-    scene = Scene(
-        project_id=project.id,
-        sequence_order=0,
-        title="场景一",
-        video_prompt="A cinematic shot",
-        duration_seconds=5.0,
-        status="generated",
-    )
-    db_session.add(scene)
-    await db_session.flush()
     await seed_single_panel(
         db_session,
         project.id,
@@ -207,35 +213,33 @@ async def test_compose_async_should_queue_task(
 @pytest.mark.asyncio
 async def test_task_status_endpoint_should_return_result(
     client: AsyncClient,
-    monkeypatch: pytest.MonkeyPatch,
+    db_session: AsyncSession,
 ):
-    class FakeAsyncResult:
-        state = "SUCCESS"
-        result = {"composition_id": "comp-1"}
-
-        def __init__(self, task_id: str, app):
-            self.task_id = task_id
-            self.app = app
-
-        def ready(self) -> bool:
-            return True
-
-        def successful(self) -> bool:
-            return True
-
-    monkeypatch.setattr("app.api.tasks.AsyncResult", FakeAsyncResult)
+    task = TaskRecord(
+        task_type="compose",
+        target_type="project",
+        target_id="project-1",
+        project_id="project-1",
+        source_task_id="comp-task-1",
+        status="completed",
+        message="合成完成",
+        result_json='{"composition_id":"comp-1"}',
+    )
+    db_session.add(task)
+    await db_session.commit()
 
     response = await client.get("/api/tasks/comp-task-1")
     assert response.status_code == 200
     data = response.json()["data"]
-    assert data["task_id"] == "comp-task-1"
-    assert data["state"] == "success"
+    assert data["task_id"] == task.id
+    assert data["source_task_id"] == "comp-task-1"
+    assert data["state"] == "completed"
     assert data["successful"] is True
     assert data["result"]["composition_id"] == "comp-1"
 
 
 @pytest.mark.asyncio
-async def test_parse_async_should_fallback_to_sync_when_worker_unavailable(
+async def test_parse_async_should_reject_when_worker_unavailable(
     client: AsyncClient,
     db_session: AsyncSession,
     monkeypatch: pytest.MonkeyPatch,
@@ -263,25 +267,22 @@ async def test_parse_async_should_fallback_to_sync_when_worker_unavailable(
 
     response = await client.post(f"/api/projects/{project.id}/parse", params={"async_mode": "true"})
 
-    assert response.status_code == 200
-    data = response.json()["data"]
-    assert data["character_count"] == 2
-    assert data["panel_count"] == 3
-    assert "task_id" not in data
+    assert response.status_code == 409
+    assert "当前没有可用的 Celery worker" in response.json()["detail"]
 
 
 @pytest.mark.asyncio
-async def test_generate_async_should_fallback_to_sync_when_worker_unavailable(
+async def test_generate_async_should_reject_when_worker_unavailable(
     client: AsyncClient,
     db_session: AsyncSession,
     monkeypatch: pytest.MonkeyPatch,
 ):
     _force_worker_unavailable(monkeypatch)
 
-    async def fake_generate_all(self, project_id: str, db: AsyncSession, *, scene_ids=None):  # noqa: ANN001
-        scenes = (await db.execute(select(Scene).where(Scene.project_id == project_id))).scalars().all()
-        for scene in scenes:
-            scene.status = "generated"
+    async def fake_generate_all(self, project_id: str, db: AsyncSession, *, panel_ids=None):  # noqa: ANN001
+        panels = (await db.execute(select(Panel).where(Panel.project_id == project_id))).scalars().all()
+        for panel in panels:
+            panel.status = "completed"
         await db.flush()
 
     monkeypatch.setattr("app.services.video_generator.VideoGeneratorService.generate_all", fake_generate_all)
@@ -290,16 +291,6 @@ async def test_generate_async_should_fallback_to_sync_when_worker_unavailable(
     db_session.add(project)
     await db_session.flush()
 
-    scene = Scene(
-        project_id=project.id,
-        sequence_order=0,
-        title="场景一",
-        video_prompt="A cinematic shot",
-        duration_seconds=5.0,
-        status="pending",
-    )
-    db_session.add(scene)
-    await db_session.flush()
     await seed_single_panel(
         db_session,
         project.id,
@@ -312,16 +303,12 @@ async def test_generate_async_should_fallback_to_sync_when_worker_unavailable(
 
     response = await client.post(f"/api/projects/{project.id}/generate", params={"async_mode": "true"})
 
-    assert response.status_code == 200
-    data = response.json()["data"]
-    assert data["total_panels"] == 1
-    assert data["completed"] == 1
-    assert data["failed"] == 0
-    assert "task_id" not in data
+    assert response.status_code == 409
+    assert "当前没有可用的 Celery worker" in response.json()["detail"]
 
 
 @pytest.mark.asyncio
-async def test_compose_async_should_fallback_to_sync_when_worker_unavailable(
+async def test_compose_async_should_reject_when_worker_unavailable(
     client: AsyncClient,
     db_session: AsyncSession,
     monkeypatch: pytest.MonkeyPatch,
@@ -332,16 +319,6 @@ async def test_compose_async_should_fallback_to_sync_when_worker_unavailable(
     db_session.add(project)
     await db_session.flush()
 
-    scene = Scene(
-        project_id=project.id,
-        sequence_order=0,
-        title="场景一",
-        video_prompt="A cinematic shot",
-        duration_seconds=5.0,
-        status="generated",
-    )
-    db_session.add(scene)
-    await db_session.flush()
     await seed_single_panel(
         db_session,
         project.id,
@@ -364,10 +341,8 @@ async def test_compose_async_should_fallback_to_sync_when_worker_unavailable(
         json={"include_subtitles": False, "include_tts": False},
     )
 
-    assert response.status_code == 200
-    data = response.json()["data"]
-    assert data["composition_id"] == "comp-sync-1"
-    assert "task_id" not in data
+    assert response.status_code == 409
+    assert "当前没有可用的 Celery worker" in response.json()["detail"]
 
 
 @pytest.mark.asyncio

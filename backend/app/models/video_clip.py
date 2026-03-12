@@ -11,12 +11,12 @@ from app.database import Base
 
 
 class VideoClip(Base):
-    """视频片段：单个场景生成的视频文件"""
+    """视频片段：单个分镜生成的视频文件"""
 
     __tablename__ = "video_clips"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
-    scene_id: Mapped[str] = mapped_column(String(36), ForeignKey("scenes.id", ondelete="CASCADE"), nullable=False)
+    panel_id: Mapped[str] = mapped_column(String(36), ForeignKey("panels.id", ondelete="CASCADE"), nullable=False, index=True)
     clip_order: Mapped[int] = mapped_column(Integer, default=0)
     candidate_index: Mapped[int] = mapped_column(Integer, default=0)
     is_selected: Mapped[bool] = mapped_column(Boolean, default=True)
@@ -28,4 +28,4 @@ class VideoClip(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
 
-    scene: Mapped["Scene"] = relationship("Scene", back_populates="video_clips")
+    panel: Mapped["Panel"] = relationship("Panel", back_populates="video_clips")

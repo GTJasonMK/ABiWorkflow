@@ -13,6 +13,9 @@ from app.api.response_utils import isoformat_or_empty, json_dict_or_empty
 from app.database import get_db
 from app.models import (
     EpisodeAssetOverride,
+    GlobalCharacter,
+    GlobalLocation,
+    GlobalVoice,
     Panel,
     PanelAssetOverride,
     ScriptEntity,
@@ -30,6 +33,16 @@ router = APIRouter(tags=["剧本资产绑定"])
 
 SUPPORTED_ENTITY_TYPES = {"character", "location", "speaker"}
 SUPPORTED_ASSET_TYPES = {"character", "location", "voice"}
+ASSET_MODEL_BY_TYPE = {
+    "character": GlobalCharacter,
+    "location": GlobalLocation,
+    "voice": GlobalVoice,
+}
+ASSET_LABEL_BY_TYPE = {
+    "character": "角色",
+    "location": "地点",
+    "voice": "语音",
+}
 
 
 class AssetBindingPayload(BaseModel):
@@ -158,6 +171,39 @@ def _ensure_primary(rows: list[dict[str, Any]], *, scope_key: str | None = None)
             item["is_primary"] = item is primary
 
 
+async def _validate_asset_rows_for_project(
+    db: AsyncSession,
+    *,
+    project_id: str,
+    rows: list[dict[str, Any]],
+) -> None:
+    grouped_ids: dict[str, set[str]] = {}
+    for row in rows:
+        asset_type = str(row.get("asset_type") or "").strip().lower()
+        asset_id = str(row.get("asset_id") or "").strip()
+        if asset_type and asset_id:
+            grouped_ids.setdefault(asset_type, set()).add(asset_id)
+
+    for asset_type, asset_ids in grouped_ids.items():
+        model = ASSET_MODEL_BY_TYPE[asset_type]
+        label = ASSET_LABEL_BY_TYPE[asset_type]
+        matches = (await db.execute(
+            select(model.id, model.project_id).where(model.id.in_(list(asset_ids)))
+        )).all()
+        found_ids = {asset_id for asset_id, _project_id in matches}
+        missing_ids = sorted(asset_ids - found_ids)
+        if missing_ids:
+            raise HTTPException(status_code=400, detail=f"包含不存在的{label}资产ID: {', '.join(missing_ids)}")
+
+        foreign_ids = sorted(
+            asset_id
+            for asset_id, asset_project_id in matches
+            if asset_project_id and asset_project_id != project_id
+        )
+        if foreign_ids:
+            raise HTTPException(status_code=400, detail=f"包含不属于当前项目的{label}资产ID: {', '.join(foreign_ids)}")
+
+
 def _binding_dict(item: ScriptEntityAssetBinding) -> dict[str, Any]:
     return {
         "id": item.id,
@@ -256,6 +302,7 @@ async def create_script_entity(project_id: str, body: ScriptEntityCreate, db: As
     await db.flush()
 
     rows = _normalize_bindings(body.bindings)
+    await _validate_asset_rows_for_project(db, project_id=project_id, rows=rows)
     for item in rows:
         db.add(ScriptEntityAssetBinding(
             project_id=project_id,
@@ -336,6 +383,7 @@ async def replace_script_entity_bindings(
 ):
     entity = await _get_entity_or_404(entity_id, db)
     rows = _normalize_bindings(body.bindings)
+    await _validate_asset_rows_for_project(db, project_id=entity.project_id, rows=rows)
     await db.execute(delete(ScriptEntityAssetBinding).where(ScriptEntityAssetBinding.entity_id == entity.id))
     for item in rows:
         db.add(ScriptEntityAssetBinding(
@@ -386,6 +434,7 @@ async def replace_episode_asset_overrides(
         if missing:
             raise HTTPException(status_code=400, detail=f"包含非法实体ID: {', '.join(sorted(missing))}")
 
+    await _validate_asset_rows_for_project(db, project_id=episode.project_id, rows=rows)
     await db.execute(delete(EpisodeAssetOverride).where(EpisodeAssetOverride.episode_id == episode.id))
     for item in rows:
         db.add(EpisodeAssetOverride(
@@ -436,6 +485,7 @@ async def replace_panel_asset_overrides(panel_id: str, body: PanelOverrideReplac
         if missing:
             raise HTTPException(status_code=400, detail=f"包含非法实体ID: {', '.join(sorted(missing))}")
 
+    await _validate_asset_rows_for_project(db, project_id=panel.project_id, rows=rows)
     await db.execute(delete(PanelAssetOverride).where(PanelAssetOverride.panel_id == panel.id))
     for item in rows:
         db.add(PanelAssetOverride(

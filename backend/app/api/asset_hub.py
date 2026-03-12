@@ -2,17 +2,28 @@ from __future__ import annotations
 
 import logging
 import uuid
-from typing import Any, Callable, Literal, TypeVar
+from typing import Any, Awaitable, Callable, Literal, TypeVar
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
-from sqlalchemy import or_, select, update
+from sqlalchemy import delete, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.response_utils import isoformat_or_none
 from app.config import resolve_runtime_path, settings
 from app.database import get_db
-from app.models import GlobalAssetFolder, GlobalCharacter, GlobalLocation, GlobalVoice, Project
+from app.models import (
+    Episode,
+    EpisodeAssetOverride,
+    GlobalAssetFolder,
+    GlobalCharacter,
+    GlobalLocation,
+    GlobalVoice,
+    Panel,
+    PanelAssetOverride,
+    Project,
+    ScriptEntityAssetBinding,
+)
 from app.schemas.common import ApiResponse
 from app.services.json_codec import from_json_text, to_json_text
 
@@ -133,6 +144,13 @@ class VoiceSampleGenerateRequest(BaseModel):
     sample_text: str | None = None
 
 
+def _require_text(value: str | None, detail: str) -> str:
+    text = _clean_text(value)
+    if not text:
+        raise HTTPException(status_code=400, detail=detail)
+    return text
+
+
 class _AssetDraftLlmResult(BaseModel):
     name: str | None = None
     description: str | None = None
@@ -145,6 +163,50 @@ AssetRowT = TypeVar("AssetRowT", GlobalAssetFolder, GlobalCharacter, GlobalLocat
 
 def _clean_text(value: str | None) -> str:
     return (value or "").strip()
+
+
+def _collapse_whitespace(value: str | None) -> str:
+    return " ".join(_clean_text(value).split())
+
+
+def _contains_any_keyword(text: str, keywords: tuple[str, ...]) -> bool:
+    return any(keyword in text for keyword in keywords)
+
+
+def _classify_asset_draft_llm_error(exc: Exception) -> tuple[int, str]:
+    status_code = getattr(exc, "status_code", None)
+    message = _collapse_whitespace(str(exc)).lower()
+
+    if status_code == 429 or _contains_any_keyword(message, (
+        "429",
+        "rate limit",
+        "too many requests",
+        "chat failed, 429",
+        "upstream 429",
+    )):
+        return 503, "当前配置的 LLM provider 上游限流，请稍后重试或切换 provider"
+
+    if status_code in {500, 502, 503, 504} or _contains_any_keyword(message, (
+        "bad gateway",
+        "gateway",
+        "server error",
+        "upstream_error",
+        "internalservererror",
+        "service unavailable",
+    )):
+        return 502, "当前配置的 LLM provider 上游服务异常，请稍后重试或切换 provider"
+
+    if _contains_any_keyword(message, (
+        "json",
+        "response_format",
+        "format",
+        "schema",
+        "prompt_template",
+        "style_prompt",
+    )):
+        return 502, "LLM 已响应，但返回结果不符合资产草案要求，请重试或切换 provider"
+
+    return 502, "LLM 生成资产提示词草案失败，请稍后重试或切换 provider"
 
 
 async def _generate_asset_draft_with_llm(body: AssetDraftFromPanelRequest) -> _AssetDraftLlmResult:
@@ -363,28 +425,98 @@ async def _render_visual_asset_reference(
     )
 
 
-async def _ensure_folder_id(folder_id: str | None, db: AsyncSession) -> str | None:
-    normalized = (folder_id or "").strip() or None
+async def _get_voice_or_404(db: AsyncSession, voice_id: str) -> GlobalVoice:
+    return await _get_row_or_404(db, GlobalVoice, voice_id, "语音不存在")
+
+
+def _ensure_supported_voice_sample_provider(voice: GlobalVoice) -> None:
+    provider = (voice.provider or "").strip().lower()
+    if provider not in {"edge-tts", "edge_tts", "edge"}:
+        raise HTTPException(status_code=400, detail="当前仅支持 edge-tts 语音样音生成")
+    _require_text(voice.voice_code, "voice_code 为空，无法生成样音")
+
+
+def _resolve_voice_sample_text(voice: GlobalVoice, body: VoiceSampleGenerateRequest) -> str:
+    return _clean_text(body.sample_text) or _clean_text(voice.style_prompt) or "你好，这是一段语音资产样音。"
+
+
+async def _save_voice_sample_url(db: AsyncSession, voice: GlobalVoice, output_name: str) -> dict[str, Any]:
+    voice.sample_audio_url = f"/media/videos/_asset_voice_samples/{output_name}"
+    return await _save_and_serialize(db, voice, _voice_payload)
+
+
+def _normalize_folder_entity(entity: GlobalAssetFolder) -> None:
+    entity.name = _require_text(entity.name, "资产目录名称不能为空")
+    entity.folder_type = _clean_text(entity.folder_type) or "generic"
+    entity.storage_path = _clean_text(entity.storage_path) or None
+    entity.description = _clean_text(entity.description) or None
+
+
+def _normalize_voice_entity(voice: GlobalVoice) -> None:
+    voice.name = _require_text(voice.name, "语音名称不能为空")
+    voice.provider = _clean_text(voice.provider) or "edge-tts"
+    voice.voice_code = _require_text(voice.voice_code, "voice_code 不能为空")
+    voice.language = _clean_text(voice.language) or None
+    voice.gender = _clean_text(voice.gender) or None
+    voice.sample_audio_url = _clean_text(voice.sample_audio_url) or None
+    voice.style_prompt = _clean_text(voice.style_prompt) or None
+
+
+async def _create_row_and_serialize(
+    db: AsyncSession,
+    *,
+    model: type[AssetRowT],
+    serializer: Callable[[AssetRowT], dict[str, Any]],
+    create_values: dict[str, Any],
+) -> dict[str, Any]:
+    entity = model(**create_values)
+    db.add(entity)
+    return await _save_and_serialize(db, entity, serializer)
+
+
+async def _ensure_existing_row_id(
+    db: AsyncSession,
+    row_id: str | None,
+    *,
+    model,
+    detail: str,
+) -> str | None:
+    normalized = _clean_text(row_id) or None
     if normalized is None:
         return None
     exists = (await db.execute(
-        select(GlobalAssetFolder.id).where(GlobalAssetFolder.id == normalized)
+        select(model.id).where(model.id == normalized)
     )).scalar_one_or_none()
     if exists is None:
-        raise HTTPException(status_code=400, detail="关联资产目录不存在")
+        raise HTTPException(status_code=400, detail=detail)
     return normalized
+
+
+async def _ensure_folder_id(folder_id: str | None, db: AsyncSession) -> str | None:
+    return await _ensure_existing_row_id(
+        db,
+        folder_id,
+        model=GlobalAssetFolder,
+        detail="关联资产目录不存在",
+    )
 
 
 async def _ensure_project_id(project_id: str | None, db: AsyncSession) -> str | None:
-    normalized = (project_id or "").strip() or None
-    if normalized is None:
-        return None
-    exists = (await db.execute(
-        select(Project.id).where(Project.id == normalized)
-    )).scalar_one_or_none()
-    if exists is None:
-        raise HTTPException(status_code=400, detail="关联项目不存在")
-    return normalized
+    return await _ensure_existing_row_id(
+        db,
+        project_id,
+        model=Project,
+        detail="关联项目不存在",
+    )
+
+
+async def _ensure_voice_id(voice_id: str | None, db: AsyncSession) -> str | None:
+    return await _ensure_existing_row_id(
+        db,
+        voice_id,
+        model=GlobalVoice,
+        detail="默认语音不存在",
+    )
 
 
 async def _resolve_scoped_refs(
@@ -401,9 +533,9 @@ async def _resolve_scoped_refs(
 
 def _build_voice_create_values(body: VoiceCreate) -> dict[str, Any]:
     return {
-        "name": body.name.strip(),
+        "name": _require_text(body.name, "语音名称不能为空"),
         "provider": _clean_text(body.provider) or "edge-tts",
-        "voice_code": body.voice_code.strip(),
+        "voice_code": _require_text(body.voice_code, "voice_code 不能为空"),
         "language": _clean_text(body.language) or None,
         "gender": _clean_text(body.gender) or None,
         "sample_audio_url": _clean_text(body.sample_audio_url) or None,
@@ -414,9 +546,11 @@ def _build_voice_create_values(body: VoiceCreate) -> dict[str, Any]:
 
 def _build_visual_asset_create_values(
     body: GlobalCharacterCreate | GlobalLocationCreate,
+    *,
+    empty_name_detail: str,
 ) -> dict[str, Any]:
     return {
-        "name": body.name.strip(),
+        "name": _require_text(body.name, empty_name_detail),
         "description": _clean_text(body.description) or None,
         "prompt_template": _clean_text(body.prompt_template) or None,
         "reference_image_url": _clean_text(body.reference_image_url) or None,
@@ -424,16 +558,56 @@ def _build_visual_asset_create_values(
     }
 
 
-def _build_character_create_values(body: GlobalCharacterCreate) -> dict[str, Any]:
+async def _validate_character_default_voice_scope(
+    db: AsyncSession,
+    *,
+    character_project_id: str | None,
+    default_voice_id: str | None,
+) -> None:
+    normalized_voice_id = _clean_text(default_voice_id) or None
+    if normalized_voice_id is None:
+        return
+
+    voice_scope = (await db.execute(
+        select(GlobalVoice.id, GlobalVoice.project_id).where(GlobalVoice.id == normalized_voice_id)
+    )).first()
+    if voice_scope is None:
+        raise HTTPException(status_code=400, detail="默认语音不存在")
+
+    voice_project_id = voice_scope[1]
+    if voice_project_id and voice_project_id != character_project_id:
+        raise HTTPException(status_code=400, detail="默认语音必须是全局语音或与角色归属同项目")
+
+
+async def _validate_character_entity_scope(db: AsyncSession, character: GlobalCharacter) -> None:
+    await _validate_character_default_voice_scope(
+        db,
+        character_project_id=character.project_id,
+        default_voice_id=character.default_voice_id,
+    )
+
+
+async def _build_character_create_values(
+    body: GlobalCharacterCreate,
+    db: AsyncSession,
+    *,
+    project_id: str | None,
+) -> dict[str, Any]:
+    default_voice_id = await _ensure_voice_id(body.default_voice_id, db)
+    await _validate_character_default_voice_scope(
+        db,
+        character_project_id=project_id,
+        default_voice_id=default_voice_id,
+    )
     return {
-        **_build_visual_asset_create_values(body),
+        **_build_visual_asset_create_values(body, empty_name_detail="角色名称不能为空"),
         "alias": _clean_text(body.alias) or None,
-        "default_voice_id": body.default_voice_id,
+        "default_voice_id": default_voice_id,
     }
 
 
 def _build_location_create_values(body: GlobalLocationCreate) -> dict[str, Any]:
-    return _build_visual_asset_create_values(body)
+    return _build_visual_asset_create_values(body, empty_name_detail="地点名称不能为空")
 
 
 async def _create_scoped_asset(
@@ -457,56 +631,43 @@ async def _update_scoped_asset(
     row_id: str,
     model: type[AssetRowT],
     detail: str,
-    serializer: Callable[[AssetRowT], dict[str, Any]],
     updates: dict[str, Any],
     json_field_map: dict[str, tuple[str, Any]] | None = None,
-) -> tuple[AssetRowT, dict[str, Any]]:
+) -> AssetRowT:
     entity = await _get_row_or_404(db, model, row_id, detail)
     normalized_updates = await _normalize_scoped_updates(db, updates)
     _apply_updates(entity, normalized_updates, json_field_map=json_field_map)
-    return entity, await _save_and_serialize(db, entity, serializer)
+    return entity
 
 
-async def _create_visual_asset(
-    db: AsyncSession,
-    *,
-    body: GlobalCharacterCreate | GlobalLocationCreate,
-    model: type[GlobalCharacter] | type[GlobalLocation],
-    serializer: Callable[[GlobalCharacter | GlobalLocation], dict[str, Any]],
-    create_values: dict[str, Any],
-) -> dict[str, Any]:
-    return await _create_scoped_asset(
-        db,
-        project_id=body.project_id,
-        folder_id=body.folder_id,
-        model=model,
-        serializer=serializer,
-        create_values=create_values,
-    )
-
-
-async def _update_visual_asset(
+async def _update_asset_and_serialize(
     db: AsyncSession,
     *,
     row_id: str,
-    body: GlobalCharacterUpdate | GlobalLocationUpdate,
-    model: type[GlobalCharacter] | type[GlobalLocation],
+    model: type[AssetRowT],
     detail: str,
-    serializer: Callable[[GlobalCharacter | GlobalLocation], dict[str, Any]],
-    empty_name_detail: str,
+    updates: dict[str, Any],
+    serializer: Callable[[AssetRowT], dict[str, Any]],
+    json_field_map: dict[str, tuple[str, Any]] | None = None,
+    name_detail: str | None = None,
+    normalizer: Callable[[AssetRowT], None] | None = None,
+    validator: Callable[[AsyncSession, AssetRowT], Awaitable[None]] | None = None,
 ) -> dict[str, Any]:
-    entity, payload = await _update_scoped_asset(
+    entity = await _update_scoped_asset(
         db,
         row_id=row_id,
         model=model,
         detail=detail,
-        serializer=serializer,
-        updates=body.model_dump(exclude_unset=True),
-        json_field_map={"tags": ("tags_json", [])},
+        updates=updates,
+        json_field_map=json_field_map,
     )
-    if not entity.name:
-        raise HTTPException(status_code=400, detail=empty_name_detail)
-    return payload
+    if name_detail is not None:
+        entity.name = _require_text(getattr(entity, "name", None), name_detail)
+    if normalizer is not None:
+        normalizer(entity)
+    if validator is not None:
+        await validator(db, entity)
+    return await _save_and_serialize(db, entity, serializer)
 
 
 def _folder_order_stmt():
@@ -516,7 +677,7 @@ def _folder_order_stmt():
 
 def _build_folder_create_values(body: FolderCreate) -> dict[str, Any]:
     return {
-        "name": body.name.strip(),
+        "name": _require_text(body.name, "资产目录名称不能为空"),
         "folder_type": _clean_text(body.folder_type) or "generic",
         "storage_path": _clean_text(body.storage_path) or None,
         "description": _clean_text(body.description) or None,
@@ -544,6 +705,8 @@ async def _normalize_scoped_updates(db: AsyncSession, updates: dict[str, Any]) -
         normalized["folder_id"] = await _ensure_folder_id(normalized["folder_id"], db)
     if "project_id" in normalized:
         normalized["project_id"] = await _ensure_project_id(normalized["project_id"], db)
+    if "default_voice_id" in normalized:
+        normalized["default_voice_id"] = await _ensure_voice_id(normalized["default_voice_id"], db)
     return normalized
 
 
@@ -575,14 +738,181 @@ async def _save_and_serialize(
     return serializer(entity)
 
 
-async def _delete_row(
+async def _list_scoped_payloads(
     db: AsyncSession,
+    model: type[AssetRowT],
+    serializer: Callable[[AssetRowT], dict[str, Any]],
+    *,
+    scope: Literal["all", "global", "project"] = "all",
+    project_id: str | None = None,
+) -> list[dict[str, Any]]:
+    rows = await _list_scoped_rows(db, model, scope=scope, project_id=project_id)
+    return [serializer(item) for item in rows]
+
+
+async def _delete_folder_and_detach_assets(db: AsyncSession, folder_id: str) -> None:
+    folder = await _get_row_or_404(db, GlobalAssetFolder, folder_id, "资产目录不存在")
+    await db.execute(update(GlobalVoice).where(GlobalVoice.folder_id == folder_id).values(folder_id=None))
+    await db.execute(update(GlobalCharacter).where(GlobalCharacter.folder_id == folder_id).values(folder_id=None))
+    await db.execute(update(GlobalLocation).where(GlobalLocation.folder_id == folder_id).values(folder_id=None))
+    await db.delete(folder)
+    await db.commit()
+
+
+async def _affected_project_ids_for_assets(
+    db: AsyncSession,
+    *,
+    asset_type: Literal["character", "location", "voice"],
+    asset_ids: list[str] | set[str] | tuple[str, ...],
+) -> set[str]:
+    normalized_asset_ids = [asset_id for asset_id in asset_ids if asset_id]
+    if not normalized_asset_ids:
+        return set()
+
+    project_ids = {
+        project_id
+        for project_id in (await db.execute(
+            select(ScriptEntityAssetBinding.project_id).where(
+                ScriptEntityAssetBinding.asset_type == asset_type,
+                ScriptEntityAssetBinding.asset_id.in_(normalized_asset_ids),
+            )
+        )).scalars().all()
+        if project_id
+    }
+    project_ids.update(
+        project_id
+        for project_id in (await db.execute(
+            select(Episode.project_id)
+            .join(EpisodeAssetOverride, EpisodeAssetOverride.episode_id == Episode.id)
+            .where(
+                EpisodeAssetOverride.asset_type == asset_type,
+                EpisodeAssetOverride.asset_id.in_(normalized_asset_ids),
+            )
+        )).scalars().all()
+        if project_id
+    )
+    project_ids.update(
+        project_id
+        for project_id in (await db.execute(
+            select(Panel.project_id)
+            .join(PanelAssetOverride, PanelAssetOverride.panel_id == Panel.id)
+            .where(
+                PanelAssetOverride.asset_type == asset_type,
+                PanelAssetOverride.asset_id.in_(normalized_asset_ids),
+            )
+        )).scalars().all()
+        if project_id
+    )
+    return project_ids
+
+
+async def _affected_project_ids_for_asset_delete(
+    db: AsyncSession,
+    *,
+    asset_type: Literal["character", "location", "voice"],
+    asset_id: str,
+) -> set[str]:
+    return await _affected_project_ids_for_asset_change(db, asset_type=asset_type, asset_id=asset_id)
+
+
+async def _affected_project_ids_for_asset_change(
+    db: AsyncSession,
+    *,
+    asset_type: Literal["character", "location", "voice"],
+    asset_id: str,
+) -> set[str]:
+    affected_project_ids = await _affected_project_ids_for_assets(db, asset_type=asset_type, asset_ids=[asset_id])
+    if asset_type != "voice":
+        return affected_project_ids
+
+    default_voice_character_ids = [
+        character_id
+        for character_id in (await db.execute(
+            select(GlobalCharacter.id).where(GlobalCharacter.default_voice_id == asset_id)
+        )).scalars().all()
+        if character_id
+    ]
+    affected_project_ids.update(
+        await _affected_project_ids_for_assets(
+            db,
+            asset_type="character",
+            asset_ids=default_voice_character_ids,
+        )
+    )
+    affected_project_ids.update(
+        project_id
+        for project_id in (await db.execute(
+            select(Panel.project_id).where(Panel.voice_id == asset_id)
+        )).scalars().all()
+        if project_id
+    )
+    return affected_project_ids
+
+
+async def _recompile_affected_projects_for_asset_change(
+    db: AsyncSession,
+    *,
+    asset_type: Literal["character", "location", "voice"],
+    asset_id: str,
+) -> None:
+    from app.services.script_asset_compiler import compile_project_effective_bindings
+
+    affected_project_ids = await _affected_project_ids_for_asset_change(db, asset_type=asset_type, asset_id=asset_id)
+    if not affected_project_ids:
+        return
+
+    for project_id in sorted(affected_project_ids):
+        await compile_project_effective_bindings(project_id, db)
+    await db.commit()
+
+
+async def _delete_asset_bindings(
+    db: AsyncSession,
+    *,
+    asset_type: Literal["character", "location", "voice"],
+    asset_id: str,
+) -> None:
+    await db.execute(delete(ScriptEntityAssetBinding).where(
+        ScriptEntityAssetBinding.asset_type == asset_type,
+        ScriptEntityAssetBinding.asset_id == asset_id,
+    ))
+    await db.execute(delete(EpisodeAssetOverride).where(
+        EpisodeAssetOverride.asset_type == asset_type,
+        EpisodeAssetOverride.asset_id == asset_id,
+    ))
+    await db.execute(delete(PanelAssetOverride).where(
+        PanelAssetOverride.asset_type == asset_type,
+        PanelAssetOverride.asset_id == asset_id,
+    ))
+
+
+async def _delete_global_asset_and_cleanup(
+    db: AsyncSession,
+    *,
     model: type[AssetRowT],
     row_id: str,
     detail: str,
+    asset_type: Literal["character", "location", "voice"],
 ) -> None:
+    from app.services.script_asset_compiler import compile_project_effective_bindings
+
     entity = await _get_row_or_404(db, model, row_id, detail)
+    affected_project_ids = await _affected_project_ids_for_asset_delete(db, asset_type=asset_type, asset_id=row_id)
+
+    if asset_type == "voice":
+        await db.execute(
+            update(GlobalCharacter)
+            .where(GlobalCharacter.default_voice_id == row_id)
+            .values(default_voice_id=None)
+        )
+        await db.execute(update(Panel).where(Panel.voice_id == row_id).values(voice_id=None))
+
+    await _delete_asset_bindings(db, asset_type=asset_type, asset_id=row_id)
     await db.delete(entity)
+
+    for project_id in sorted(affected_project_ids):
+        await compile_project_effective_bindings(project_id, db)
+
     await db.commit()
 
 
@@ -627,14 +957,18 @@ async def generate_asset_draft_from_panel(body: AssetDraftFromPanelRequest):
     if not settings.llm_api_key.strip():
         raise HTTPException(status_code=400, detail="未配置 LLM_API_KEY，无法生成资产提示词草案")
     try:
-        draft_from_llm = await _generate_asset_draft_with_llm(body)
-        draft = _coerce_asset_draft(body, draft_from_llm)
-        return ApiResponse(data=draft.model_dump())
+        return ApiResponse(data=_coerce_asset_draft(body, await _generate_asset_draft_with_llm(body)).model_dump())
     except HTTPException:
         raise
-    except Exception as exc:  # noqa: BLE001 - 统一抛给前端，避免静默降级
-        logger.exception("资产提示词草案 LLM 生成失败: %s", exc)
-        raise HTTPException(status_code=502, detail=f"LLM 生成资产提示词草案失败: {exc}") from exc
+    except Exception as exc:  # noqa: BLE001 - 统一抛给前端，避免静默失败
+        status_code, detail = _classify_asset_draft_llm_error(exc)
+        logger.exception(
+            "资产提示词草案 LLM 生成失败: status=%s, detail=%s, error=%s",
+            status_code,
+            detail,
+            exc,
+        )
+        raise HTTPException(status_code=status_code, detail=detail) from exc
 
 
 @router.post("/characters/{character_id}/render-reference", response_model=ApiResponse[dict])
@@ -670,19 +1004,9 @@ async def render_global_voice_sample(
     body: VoiceSampleGenerateRequest,
     db: AsyncSession = Depends(get_db),
 ):
-    voice = (await db.execute(select(GlobalVoice).where(GlobalVoice.id == voice_id))).scalar_one_or_none()
-    if voice is None:
-        raise HTTPException(status_code=404, detail="语音不存在")
-
-    provider = (voice.provider or "").strip().lower()
-    if provider not in {"edge-tts", "edge_tts", "edge"}:
-        raise HTTPException(status_code=400, detail="当前仅支持 edge-tts 语音样音生成")
-    if not _clean_text(voice.voice_code):
-        raise HTTPException(status_code=400, detail="voice_code 为空，无法生成样音")
-
-    sample_text = _clean_text(body.sample_text) or _clean_text(voice.style_prompt) or "你好，这是一段语音资产样音。"
-    if not sample_text:
-        raise HTTPException(status_code=400, detail="样音文本为空，无法生成")
+    voice = await _get_voice_or_404(db, voice_id)
+    _ensure_supported_voice_sample_provider(voice)
+    sample_text = _resolve_voice_sample_text(voice, body)
 
     from app.services.tts_service import TTSService
 
@@ -698,10 +1022,7 @@ async def render_global_voice_sample(
         logger.exception("语音样音生成失败: id=%s, error=%s", voice.id, exc)
         raise HTTPException(status_code=502, detail=f"语音样音生成失败: {exc}") from exc
 
-    voice.sample_audio_url = f"/media/videos/_asset_voice_samples/{output_name}"
-    await db.commit()
-    await db.refresh(voice)
-    return ApiResponse(data=_voice_payload(voice))
+    return ApiResponse(data=await _save_voice_sample_url(db, voice, output_name))
 
 
 @router.get("/folders", response_model=ApiResponse[list[dict]])
@@ -712,29 +1033,30 @@ async def list_asset_folders(db: AsyncSession = Depends(get_db)):
 
 @router.post("/folders", response_model=ApiResponse[dict])
 async def create_asset_folder(body: FolderCreate, db: AsyncSession = Depends(get_db)):
-    entity = GlobalAssetFolder(**_build_folder_create_values(body))
-    db.add(entity)
-    return ApiResponse(data=await _save_and_serialize(db, entity, _folder_payload))
+    return ApiResponse(data=await _create_row_and_serialize(
+        db,
+        model=GlobalAssetFolder,
+        serializer=_folder_payload,
+        create_values=_build_folder_create_values(body),
+    ))
 
 
 @router.put("/folders/{folder_id}", response_model=ApiResponse[dict])
 async def update_asset_folder(folder_id: str, body: FolderUpdate, db: AsyncSession = Depends(get_db)):
-    entity = await _get_row_or_404(db, GlobalAssetFolder, folder_id, "资产目录不存在")
-    _apply_updates(entity, body.model_dump(exclude_unset=True))
-    if not entity.name:
-        raise HTTPException(status_code=400, detail="资产目录名称不能为空")
-    if not entity.folder_type:
-        entity.folder_type = "generic"
-    return ApiResponse(data=await _save_and_serialize(db, entity, _folder_payload))
+    return ApiResponse(data=await _update_asset_and_serialize(
+        db,
+        row_id=folder_id,
+        model=GlobalAssetFolder,
+        detail="资产目录不存在",
+        updates=body.model_dump(exclude_unset=True),
+        serializer=_folder_payload,
+        normalizer=_normalize_folder_entity,
+    ))
 
 
 @router.delete("/folders/{folder_id}", response_model=ApiResponse[None])
 async def delete_asset_folder(folder_id: str, db: AsyncSession = Depends(get_db)):
-    await _get_row_or_404(db, GlobalAssetFolder, folder_id, "资产目录不存在")
-    await db.execute(update(GlobalVoice).where(GlobalVoice.folder_id == folder_id).values(folder_id=None))
-    await db.execute(update(GlobalCharacter).where(GlobalCharacter.folder_id == folder_id).values(folder_id=None))
-    await db.execute(update(GlobalLocation).where(GlobalLocation.folder_id == folder_id).values(folder_id=None))
-    await _delete_row(db, GlobalAssetFolder, folder_id, "资产目录不存在")
+    await _delete_folder_and_detach_assets(db, folder_id)
     return ApiResponse(data=None)
 
 
@@ -744,33 +1066,52 @@ async def list_global_voices(
     scope: Literal["all", "global", "project"] = "all",
     db: AsyncSession = Depends(get_db),
 ):
-    rows = await _list_scoped_rows(db, GlobalVoice, scope=scope, project_id=project_id)
-    return ApiResponse(data=[_voice_payload(item) for item in rows])
+    return ApiResponse(data=await _list_scoped_payloads(
+        db,
+        GlobalVoice,
+        _voice_payload,
+        scope=scope,
+        project_id=project_id,
+    ))
 
 
 @router.post("/voices", response_model=ApiResponse[dict])
 async def create_global_voice(body: VoiceCreate, db: AsyncSession = Depends(get_db)):
-    scoped_refs = await _resolve_scoped_refs(db, project_id=body.project_id, folder_id=body.folder_id)
-    voice = GlobalVoice(**scoped_refs, **_build_voice_create_values(body))
-    db.add(voice)
-    return ApiResponse(data=await _save_and_serialize(db, voice, _voice_payload))
+    return ApiResponse(data=await _create_scoped_asset(
+        db,
+        project_id=body.project_id,
+        folder_id=body.folder_id,
+        model=GlobalVoice,
+        serializer=_voice_payload,
+        create_values=_build_voice_create_values(body),
+    ))
 
 
 @router.put("/voices/{voice_id}", response_model=ApiResponse[dict])
 async def update_global_voice(voice_id: str, body: VoiceUpdate, db: AsyncSession = Depends(get_db)):
-    voice = await _get_row_or_404(db, GlobalVoice, voice_id, "语音不存在")
-    updates = await _normalize_scoped_updates(db, body.model_dump(exclude_unset=True))
-    _apply_updates(voice, updates, json_field_map={"meta": ("meta_json", {})})
-    if not voice.name:
-        raise HTTPException(status_code=400, detail="语音名称不能为空")
-    if not voice.voice_code:
-        raise HTTPException(status_code=400, detail="voice_code 不能为空")
-    return ApiResponse(data=await _save_and_serialize(db, voice, _voice_payload))
+    payload = await _update_asset_and_serialize(
+        db,
+        row_id=voice_id,
+        model=GlobalVoice,
+        detail="语音不存在",
+        updates=body.model_dump(exclude_unset=True),
+        serializer=_voice_payload,
+        json_field_map={"meta": ("meta_json", {})},
+        normalizer=_normalize_voice_entity,
+    )
+    await _recompile_affected_projects_for_asset_change(db, asset_type="voice", asset_id=voice_id)
+    return ApiResponse(data=payload)
 
 
 @router.delete("/voices/{voice_id}", response_model=ApiResponse[None])
 async def delete_global_voice(voice_id: str, db: AsyncSession = Depends(get_db)):
-    await _delete_row(db, GlobalVoice, voice_id, "语音不存在")
+    await _delete_global_asset_and_cleanup(
+        db,
+        model=GlobalVoice,
+        row_id=voice_id,
+        detail="语音不存在",
+        asset_type="voice",
+    )
     return ApiResponse(data=None)
 
 
@@ -780,37 +1121,55 @@ async def list_global_characters(
     scope: Literal["all", "global", "project"] = "all",
     db: AsyncSession = Depends(get_db),
 ):
-    rows = await _list_scoped_rows(db, GlobalCharacter, scope=scope, project_id=project_id)
-    return ApiResponse(data=[_character_payload(item) for item in rows])
+    return ApiResponse(data=await _list_scoped_payloads(
+        db,
+        GlobalCharacter,
+        _character_payload,
+        scope=scope,
+        project_id=project_id,
+    ))
 
 
 @router.post("/characters", response_model=ApiResponse[dict])
 async def create_global_character(body: GlobalCharacterCreate, db: AsyncSession = Depends(get_db)):
-    return ApiResponse(data=await _create_visual_asset(
+    scoped_refs = await _resolve_scoped_refs(db, project_id=body.project_id, folder_id=body.folder_id)
+    return ApiResponse(data=await _create_row_and_serialize(
         db,
-        body=body,
         model=GlobalCharacter,
         serializer=_character_payload,
-        create_values=_build_character_create_values(body),
+        create_values={
+            **scoped_refs,
+            **await _build_character_create_values(body, db, project_id=scoped_refs["project_id"]),
+        },
     ))
 
 
 @router.put("/characters/{character_id}", response_model=ApiResponse[dict])
 async def update_global_character(character_id: str, body: GlobalCharacterUpdate, db: AsyncSession = Depends(get_db)):
-    return ApiResponse(data=await _update_visual_asset(
+    payload = await _update_asset_and_serialize(
         db,
         row_id=character_id,
-        body=body,
         model=GlobalCharacter,
         detail="全局角色不存在",
+        updates=body.model_dump(exclude_unset=True),
         serializer=_character_payload,
-        empty_name_detail="角色名称不能为空",
-    ))
+        json_field_map={"tags": ("tags_json", [])},
+        name_detail="角色名称不能为空",
+        validator=_validate_character_entity_scope,
+    )
+    await _recompile_affected_projects_for_asset_change(db, asset_type="character", asset_id=character_id)
+    return ApiResponse(data=payload)
 
 
 @router.delete("/characters/{character_id}", response_model=ApiResponse[None])
 async def delete_global_character(character_id: str, db: AsyncSession = Depends(get_db)):
-    await _delete_row(db, GlobalCharacter, character_id, "全局角色不存在")
+    await _delete_global_asset_and_cleanup(
+        db,
+        model=GlobalCharacter,
+        row_id=character_id,
+        detail="全局角色不存在",
+        asset_type="character",
+    )
     return ApiResponse(data=None)
 
 
@@ -820,15 +1179,21 @@ async def list_global_locations(
     scope: Literal["all", "global", "project"] = "all",
     db: AsyncSession = Depends(get_db),
 ):
-    rows = await _list_scoped_rows(db, GlobalLocation, scope=scope, project_id=project_id)
-    return ApiResponse(data=[_location_payload(item) for item in rows])
+    return ApiResponse(data=await _list_scoped_payloads(
+        db,
+        GlobalLocation,
+        _location_payload,
+        scope=scope,
+        project_id=project_id,
+    ))
 
 
 @router.post("/locations", response_model=ApiResponse[dict])
 async def create_global_location(body: GlobalLocationCreate, db: AsyncSession = Depends(get_db)):
-    return ApiResponse(data=await _create_visual_asset(
+    return ApiResponse(data=await _create_scoped_asset(
         db,
-        body=body,
+        project_id=body.project_id,
+        folder_id=body.folder_id,
         model=GlobalLocation,
         serializer=_location_payload,
         create_values=_build_location_create_values(body),
@@ -837,18 +1202,27 @@ async def create_global_location(body: GlobalLocationCreate, db: AsyncSession = 
 
 @router.put("/locations/{location_id}", response_model=ApiResponse[dict])
 async def update_global_location(location_id: str, body: GlobalLocationUpdate, db: AsyncSession = Depends(get_db)):
-    return ApiResponse(data=await _update_visual_asset(
+    payload = await _update_asset_and_serialize(
         db,
         row_id=location_id,
-        body=body,
         model=GlobalLocation,
         detail="全局地点不存在",
+        updates=body.model_dump(exclude_unset=True),
         serializer=_location_payload,
-        empty_name_detail="地点名称不能为空",
-    ))
+        json_field_map={"tags": ("tags_json", [])},
+        name_detail="地点名称不能为空",
+    )
+    await _recompile_affected_projects_for_asset_change(db, asset_type="location", asset_id=location_id)
+    return ApiResponse(data=payload)
 
 
 @router.delete("/locations/{location_id}", response_model=ApiResponse[None])
 async def delete_global_location(location_id: str, db: AsyncSession = Depends(get_db)):
-    await _delete_row(db, GlobalLocation, location_id, "全局地点不存在")
+    await _delete_global_asset_and_cleanup(
+        db,
+        model=GlobalLocation,
+        row_id=location_id,
+        detail="全局地点不存在",
+        asset_type="location",
+    )
     return ApiResponse(data=None)

@@ -15,6 +15,7 @@ from app.tasks.status_recovery import (
     mark_worker_task_failed,
     mark_worker_task_started,
     restore_project_status_after_task_failure,
+    rollback_and_restore_project_status,
     run_async_in_new_loop,
 )
 
@@ -64,48 +65,42 @@ def parse_script_task(
 async def _run_parse(project_id: str, previous_status: str, script_text: str | None = None) -> dict:
     """执行异步解析逻辑"""
     from sqlalchemy import select
-    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-    from app.config import resolve_database_url, settings
     from app.llm.factory import create_llm_adapter
     from app.models import Project
     from app.services.episode_parse_pipeline import parse_project_from_episodes
+    from app.tasks.db_session import task_session
 
-    engine = create_async_engine(resolve_database_url(settings.database_url))
-    session_factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    async with task_session() as db:
+        llm = None
+        try:
+            project = (await db.execute(select(Project).where(Project.id == project_id))).scalar_one()
 
-    try:
-        async with session_factory() as db:
-            llm = None
-            try:
-                project = (await db.execute(select(Project).where(Project.id == project_id))).scalar_one()
+            publish_progress(project_id, "parse_progress", {
+                PROGRESS_KEY_MESSAGE: "正在初始化解析器...",
+                PROGRESS_KEY_PERCENT: 8,
+            })
+            llm = create_llm_adapter()
 
-                publish_progress(project_id, "parse_progress", {
-                    PROGRESS_KEY_MESSAGE: "正在初始化解析器...",
-                    PROGRESS_KEY_PERCENT: 8,
-                })
-                llm = create_llm_adapter()
+            parse_input = script_text if script_text is not None else project.script_text
+            if not parse_input or not parse_input.strip():
+                raise RuntimeError("剧本内容为空，无法解析")
 
-                parse_input = script_text if script_text is not None else project.script_text
-                if not parse_input or not parse_input.strip():
-                    raise RuntimeError("剧本内容为空，无法解析")
+            result = await parse_project_from_episodes(project_id, parse_input, llm, db)
+            await db.commit()
+        except Exception:
+            await rollback_and_restore_project_status(
+                db,
+                project_id=project_id,
+                restore_status=previous_status,
+            )
+            raise
+        finally:
+            if llm is not None:
+                await llm.close()
 
-                result = await parse_project_from_episodes(project_id, parse_input, llm, db)
-                await db.commit()
-            except Exception:
-                await db.rollback()
-                project = (await db.execute(select(Project).where(Project.id == project_id))).scalar_one()
-                project.status = previous_status
-                await db.commit()
-                raise
-            finally:
-                if llm is not None:
-                    await llm.close()
-
-            return {
-                "character_count": result.character_count,
-                "panel_count": result.panel_count,
-                "episode_count": result.episode_count,
-            }
-    finally:
-        await engine.dispose()
+        return {
+            "character_count": result.character_count,
+            "panel_count": result.panel_count,
+            "episode_count": result.episode_count,
+        }

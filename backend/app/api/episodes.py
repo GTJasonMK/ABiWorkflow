@@ -1,15 +1,26 @@
 from __future__ import annotations
 
+from typing import Any
+
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.project_common import get_episode_or_404
-from app.api.response_utils import isoformat_or_empty
+from app.api.project_common import get_episode_or_404, get_project_or_404
 from app.database import get_db
 from app.models import Episode, Panel
 from app.schemas.common import ApiResponse
+from app.schemas.episode import EpisodeResponse
+from app.services.episode_response_builder import build_episode_response, build_episode_responses
+from app.services.episode_workflow import (
+    build_episode_workflow_summaries,
+)
+from app.services.episode_workflow_config import (
+    apply_episode_workflow_config,
+    resolve_episode_create_workflow_config,
+    resolve_episode_update_workflow_config,
+)
 
 router = APIRouter(tags=["分集管理"])
 
@@ -18,46 +29,27 @@ class EpisodeCreate(BaseModel):
     title: str = Field(min_length=1, max_length=200)
     summary: str | None = None
     script_text: str | None = None
+    video_provider_key: str | None = Field(default=None, min_length=1, max_length=120)
+    tts_provider_key: str | None = Field(default=None, min_length=1, max_length=120)
+    lipsync_provider_key: str | None = Field(default=None, min_length=1, max_length=120)
+    provider_payload_defaults: dict[str, dict[str, Any]] | None = None
+    skipped_checks: list[str] = Field(default_factory=list)
 
 
 class EpisodeUpdate(BaseModel):
     title: str | None = Field(default=None, min_length=1, max_length=200)
     summary: str | None = None
     script_text: str | None = None
+    video_provider_key: str | None = Field(default=None, min_length=1, max_length=120)
+    tts_provider_key: str | None = Field(default=None, min_length=1, max_length=120)
+    lipsync_provider_key: str | None = Field(default=None, min_length=1, max_length=120)
+    provider_payload_defaults: dict[str, dict[str, Any]] | None = None
+    skipped_checks: list[str] | None = None
     status: str | None = None
 
 
 class EpisodeReorderRequest(BaseModel):
     episode_ids: list[str]
-
-
-class EpisodeResponse(BaseModel):
-    id: str
-    project_id: str
-    episode_order: int
-    title: str
-    summary: str | None
-    script_text: str | None
-    status: str
-    panel_count: int = 0
-    created_at: str
-    updated_at: str
-
-
-def _to_episode_response(episode: Episode, panel_count: int = 0) -> EpisodeResponse:
-    return EpisodeResponse(
-        id=episode.id,
-        project_id=episode.project_id,
-        episode_order=episode.episode_order,
-        title=episode.title,
-        summary=episode.summary,
-        script_text=episode.script_text,
-        status=episode.status,
-        panel_count=panel_count,
-        created_at=isoformat_or_empty(episode.created_at),
-        updated_at=isoformat_or_empty(episode.updated_at),
-    )
-
 
 
 @router.get("/projects/{project_id}/episodes", response_model=ApiResponse[list[EpisodeResponse]])
@@ -74,14 +66,25 @@ async def list_episodes(project_id: str, db: AsyncSession = Depends(get_db)):
         .group_by(Panel.episode_id)
     )).all()
     panel_count_map = {episode_id: int(count or 0) for episode_id, count in count_rows}
-    return ApiResponse(data=[_to_episode_response(item, panel_count_map.get(item.id, 0)) for item in episodes])
+    data = await build_episode_responses(episodes, db=db, panel_count_map=panel_count_map)
+    return ApiResponse(data=data)
 
 
 @router.post("/projects/{project_id}/episodes", response_model=ApiResponse[EpisodeResponse])
 async def create_episode(project_id: str, body: EpisodeCreate, db: AsyncSession = Depends(get_db)):
+    project = await get_project_or_404(project_id, db)
     title = body.title.strip()
     if not title:
         raise HTTPException(status_code=400, detail="分集标题不能为空")
+
+    try:
+        workflow_config = await resolve_episode_create_workflow_config(
+            db,
+            project=project,
+            raw_config=body.model_dump(exclude_unset=True),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     max_order = (await db.execute(
         select(func.coalesce(func.max(Episode.episode_order), -1)).where(Episode.project_id == project_id)
@@ -94,10 +97,12 @@ async def create_episode(project_id: str, body: EpisodeCreate, db: AsyncSession 
         summary=(body.summary or "").strip() or None,
         script_text=(body.script_text or "").strip() or None,
     )
+    apply_episode_workflow_config(episode, workflow_config)
     db.add(episode)
     await db.commit()
     await db.refresh(episode)
-    return ApiResponse(data=_to_episode_response(episode))
+    response = (await build_episode_responses([episode], db=db))[0]
+    return ApiResponse(data=response)
 
 
 @router.get("/episodes/{episode_id}", response_model=ApiResponse[EpisodeResponse])
@@ -106,7 +111,13 @@ async def get_episode(episode_id: str, db: AsyncSession = Depends(get_db)):
     panel_count = (await db.execute(
         select(func.count(Panel.id)).where(Panel.episode_id == episode_id)
     )).scalar() or 0
-    return ApiResponse(data=_to_episode_response(episode, int(panel_count)))
+    workflow_summary = (await build_episode_workflow_summaries([episode], db)).get(episode.id, {})
+    response = build_episode_response(
+        episode,
+        panel_count=int(panel_count),
+        workflow_summary=workflow_summary,
+    )
+    return ApiResponse(data=response)
 
 
 @router.put("/episodes/{episode_id}", response_model=ApiResponse[EpisodeResponse])
@@ -123,6 +134,11 @@ async def update_episode(episode_id: str, body: EpisodeUpdate, db: AsyncSession 
         episode.summary = (updates["summary"] or "").strip() or None
     if "script_text" in updates:
         episode.script_text = (updates["script_text"] or "").strip() or None
+    try:
+        workflow_config = await resolve_episode_update_workflow_config(db, raw_updates=updates)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    apply_episode_workflow_config(episode, workflow_config)
     if "status" in updates and updates["status"] is not None:
         episode.status = str(updates["status"]).strip() or episode.status
 
@@ -131,7 +147,13 @@ async def update_episode(episode_id: str, body: EpisodeUpdate, db: AsyncSession 
     panel_count = (await db.execute(
         select(func.count(Panel.id)).where(Panel.episode_id == episode_id)
     )).scalar() or 0
-    return ApiResponse(data=_to_episode_response(episode, int(panel_count)))
+    workflow_summary = (await build_episode_workflow_summaries([episode], db)).get(episode.id, {})
+    response = build_episode_response(
+        episode,
+        panel_count=int(panel_count),
+        workflow_summary=workflow_summary,
+    )
+    return ApiResponse(data=response)
 
 
 @router.delete("/episodes/{episode_id}", response_model=ApiResponse[None])

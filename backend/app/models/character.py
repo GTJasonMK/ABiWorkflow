@@ -26,6 +26,3 @@ class Character(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
 
     project: Mapped["Project"] = relationship("Project", back_populates="characters")
-    scenes: Mapped[list["SceneCharacter"]] = relationship(
-        "SceneCharacter", back_populates="character", cascade="all, delete-orphan"
-    )

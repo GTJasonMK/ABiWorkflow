@@ -17,13 +17,15 @@ logger = logging.getLogger(__name__)
 
 
 def _build_v1_base_url(raw_base: str) -> str:
-    """确保 base_url 以 /v1 结尾。"""
-    base = raw_base.strip().rstrip("/")
+    """要求 base_url 显式以 /v1 结尾（不做自动补全/兼容修复）。"""
+    base = raw_base.strip()
     if not base:
         raise ValueError("PORTRAIT_API_BASE_URL 未配置，无法生成立绘")
-    if base.endswith("/v1"):
-        return base
-    return f"{base}/v1"
+    if base.endswith("/"):
+        raise ValueError("PORTRAIT_API_BASE_URL 不能以 / 结尾，请填写 .../v1")
+    if not base.endswith("/v1"):
+        raise ValueError("PORTRAIT_API_BASE_URL 必须以 /v1 结尾，例如 https://glk.jia4u.de/v1")
+    return base
 
 
 def _build_portrait_prompt(

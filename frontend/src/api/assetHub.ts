@@ -5,6 +5,8 @@ import type { AssetFolder, AssetHubOverview, GlobalCharacterAsset, GlobalLocatio
 export type AssetScope = 'all' | 'global' | 'project'
 export type AssetDraftType = 'character' | 'location' | 'voice'
 
+const ASSET_GENERATION_TIMEOUT_MS = 5 * 60 * 1000
+
 export interface AssetDraftFromPanelRequest {
   asset_type: AssetDraftType
   panel_title: string
@@ -30,6 +32,53 @@ export interface AssetHubOverviewQuery {
   scope?: AssetScope
 }
 
+export interface CreateAssetFolderPayload {
+  name: string
+  folder_type?: string
+  storage_path?: string
+  description?: string
+  sort_order?: number
+  is_active?: boolean
+}
+
+export interface CreateGlobalVoicePayload {
+  name: string
+  project_id?: string | null
+  provider: string
+  voice_code: string
+  folder_id?: string | null
+  language?: string
+  gender?: string
+  sample_audio_url?: string
+  style_prompt?: string
+  is_active?: boolean
+  meta?: Record<string, unknown>
+}
+
+export interface CreateGlobalCharacterPayload {
+  name: string
+  project_id?: string | null
+  folder_id?: string | null
+  alias?: string
+  description?: string
+  prompt_template?: string
+  reference_image_url?: string
+  default_voice_id?: string | null
+  tags?: string[]
+  is_active?: boolean
+}
+
+export interface CreateGlobalLocationPayload {
+  name: string
+  project_id?: string | null
+  folder_id?: string | null
+  description?: string
+  prompt_template?: string
+  reference_image_url?: string
+  tags?: string[]
+  is_active?: boolean
+}
+
 function buildOverviewQuery(options?: AssetHubOverviewQuery): string {
   const params = new URLSearchParams()
   const scope = options?.scope ?? 'all'
@@ -47,17 +96,29 @@ export async function getAssetHubOverview(options?: AssetHubOverviewQuery): Prom
 }
 
 export async function generateAssetDraftFromPanel(payload: AssetDraftFromPanelRequest): Promise<AssetDraftFromPanelResponse> {
-  const resp = await client.post<ApiResponse<AssetDraftFromPanelResponse>>('/asset-hub/drafts/from-panel', payload)
+  const resp = await client.post<ApiResponse<AssetDraftFromPanelResponse>>(
+    '/asset-hub/drafts/from-panel',
+    payload,
+    { timeout: ASSET_GENERATION_TIMEOUT_MS },
+  )
   return resp.data.data!
 }
 
 export async function renderGlobalCharacterReference(characterId: string): Promise<GlobalCharacterAsset> {
-  const resp = await client.post<ApiResponse<GlobalCharacterAsset>>(`/asset-hub/characters/${characterId}/render-reference`)
+  const resp = await client.post<ApiResponse<GlobalCharacterAsset>>(
+    `/asset-hub/characters/${characterId}/render-reference`,
+    {},
+    { timeout: ASSET_GENERATION_TIMEOUT_MS },
+  )
   return resp.data.data!
 }
 
 export async function renderGlobalLocationReference(locationId: string): Promise<GlobalLocationAsset> {
-  const resp = await client.post<ApiResponse<GlobalLocationAsset>>(`/asset-hub/locations/${locationId}/render-reference`)
+  const resp = await client.post<ApiResponse<GlobalLocationAsset>>(
+    `/asset-hub/locations/${locationId}/render-reference`,
+    {},
+    { timeout: ASSET_GENERATION_TIMEOUT_MS },
+  )
   return resp.data.data!
 }
 
@@ -65,16 +126,15 @@ export async function renderGlobalVoiceSample(
   voiceId: string,
   payload?: { sample_text?: string },
 ): Promise<GlobalVoice> {
-  const resp = await client.post<ApiResponse<GlobalVoice>>(`/asset-hub/voices/${voiceId}/render-sample`, payload ?? {})
+  const resp = await client.post<ApiResponse<GlobalVoice>>(
+    `/asset-hub/voices/${voiceId}/render-sample`,
+    payload ?? {},
+    { timeout: ASSET_GENERATION_TIMEOUT_MS },
+  )
   return resp.data.data!
 }
 
-export async function createAssetFolder(payload: {
-  name: string
-  folder_type?: string
-  storage_path?: string
-  description?: string
-}): Promise<AssetFolder> {
+export async function createAssetFolder(payload: CreateAssetFolderPayload): Promise<AssetFolder> {
   const resp = await client.post<ApiResponse<AssetFolder>>('/asset-hub/folders', payload)
   return resp.data.data!
 }
@@ -91,18 +151,7 @@ export async function deleteAssetFolder(folderId: string): Promise<void> {
   await client.delete(`/asset-hub/folders/${folderId}`)
 }
 
-export async function createGlobalVoice(payload: {
-  name: string
-  project_id?: string | null
-  provider: string
-  voice_code: string
-  folder_id?: string | null
-  language?: string
-  gender?: string
-  sample_audio_url?: string
-  style_prompt?: string
-  meta?: Record<string, unknown>
-}): Promise<GlobalVoice> {
+export async function createGlobalVoice(payload: CreateGlobalVoicePayload): Promise<GlobalVoice> {
   const resp = await client.post<ApiResponse<GlobalVoice>>('/asset-hub/voices', payload)
   return resp.data.data!
 }
@@ -120,17 +169,7 @@ export async function deleteGlobalVoice(voiceId: string): Promise<void> {
   await client.delete(`/asset-hub/voices/${voiceId}`)
 }
 
-export async function createGlobalCharacter(payload: {
-  name: string
-  project_id?: string | null
-  folder_id?: string | null
-  alias?: string
-  description?: string
-  prompt_template?: string
-  reference_image_url?: string
-  default_voice_id?: string | null
-  tags?: string[]
-}): Promise<GlobalCharacterAsset> {
+export async function createGlobalCharacter(payload: CreateGlobalCharacterPayload): Promise<GlobalCharacterAsset> {
   const resp = await client.post<ApiResponse<GlobalCharacterAsset>>('/asset-hub/characters', payload)
   return resp.data.data!
 }
@@ -151,15 +190,7 @@ export async function deleteGlobalCharacter(characterId: string): Promise<void> 
   await client.delete(`/asset-hub/characters/${characterId}`)
 }
 
-export async function createGlobalLocation(payload: {
-  name: string
-  project_id?: string | null
-  folder_id?: string | null
-  description?: string
-  prompt_template?: string
-  reference_image_url?: string
-  tags?: string[]
-}): Promise<GlobalLocationAsset> {
+export async function createGlobalLocation(payload: CreateGlobalLocationPayload): Promise<GlobalLocationAsset> {
   const resp = await client.post<ApiResponse<GlobalLocationAsset>>('/asset-hub/locations', payload)
   return resp.data.data!
 }

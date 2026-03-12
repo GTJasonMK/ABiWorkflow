@@ -18,13 +18,14 @@ class Project(Base):
     name: Mapped[str] = mapped_column(String(200), nullable=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     script_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    default_video_provider_key: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    default_tts_provider_key: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    default_lipsync_provider_key: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    default_provider_payload_defaults_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     status: Mapped[str] = mapped_column(String(20), default="draft")
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
 
-    scenes: Mapped[list["Scene"]] = relationship(
-        "Scene", back_populates="project", cascade="all, delete-orphan", order_by="Scene.sequence_order"
-    )
     characters: Mapped[list["Character"]] = relationship(
         "Character", back_populates="project", cascade="all, delete-orphan"
     )

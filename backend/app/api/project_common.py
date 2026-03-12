@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from fastapi import HTTPException
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Character, Episode, Panel, Project
 from app.schemas.project import ProjectResponse
+from app.services.project_workflow_defaults import read_project_workflow_defaults
 
 
 async def get_project_or_404(project_id: str, db: AsyncSession) -> Project:
@@ -48,32 +51,31 @@ async def get_panel_or_404(panel_id: str, db: AsyncSession) -> Panel:
     return panel
 
 
-async def count_project_relations(project_id: str, db: AsyncSession) -> tuple[int, int]:
-    """查询项目分镜数量和角色数。"""
-    panel_count = (await db.execute(
-        select(func.count()).select_from(Panel).where(Panel.project_id == project_id)
-    )).scalar() or 0
-    character_count = (await db.execute(
-        select(func.count()).select_from(Character).where(Character.project_id == project_id)
-    )).scalar() or 0
-    return panel_count, character_count
+@dataclass(frozen=True, slots=True)
+class ProjectAggregateCounts:
+    character_count: int = 0
+    episode_count: int = 0
+    panel_count: int = 0
+    generated_panel_count: int = 0
 
 
-async def count_project_storyboard(project_id: str, db: AsyncSession) -> tuple[int, int, int]:
-    episode_count = (await db.execute(
-        select(func.count()).select_from(Episode).where(Episode.project_id == project_id)
-    )).scalar() or 0
-    panel_count = (await db.execute(
-        select(func.count()).select_from(Panel).where(Panel.project_id == project_id)
-    )).scalar() or 0
-
-    generated_panel_count = (await db.execute(
+async def get_project_aggregate_counts(project_id: str, db: AsyncSession) -> ProjectAggregateCounts:
+    stmt = select(
+        select(func.count()).select_from(Character).where(Character.project_id == project_id).scalar_subquery(),
+        select(func.count()).select_from(Episode).where(Episode.project_id == project_id).scalar_subquery(),
+        select(func.count()).select_from(Panel).where(Panel.project_id == project_id).scalar_subquery(),
         select(func.count()).select_from(Panel).where(
             Panel.project_id == project_id,
             (Panel.video_url.is_not(None)) | (Panel.lipsync_video_url.is_not(None)),
-        )
-    )).scalar() or 0
-    return episode_count, panel_count, generated_panel_count
+        ).scalar_subquery(),
+    )
+    row = (await db.execute(stmt)).one()
+    return ProjectAggregateCounts(
+        character_count=int(row[0] or 0),
+        episode_count=int(row[1] or 0),
+        panel_count=int(row[2] or 0),
+        generated_panel_count=int(row[3] or 0),
+    )
 
 
 def to_project_response(
@@ -95,6 +97,7 @@ def to_project_response(
         panel_count=panel_count,
         generated_panel_count=generated_panel_count,
         character_count=character_count,
+        workflow_defaults=read_project_workflow_defaults(project),
         created_at=project.created_at,
         updated_at=project.updated_at,
     )

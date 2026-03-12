@@ -15,8 +15,8 @@ export default function VideoTab() {
         <Form.Item label="任务超时（秒）" name="video_task_timeout_seconds" rules={[{ required: true, message: '请输入任务超时' }]}>
           <InputNumber min={1} max={7200} style={{ width: '100%' }} />
         </Form.Item>
-        <Form.Item label="GGK Base URL" name="ggk_base_url" tooltip="GGK 视频服务地址，当视频提供者为 GGK 时使用">
-          <Input prefix={<LinkOutlined />} style={CODE_INPUT_STYLE} placeholder="例如 http://127.0.0.1:8000/v1" allowClear />
+        <Form.Item label="GGK Base URL" name="ggk_base_url" tooltip="GGK 视频服务地址（必须以 /v1 结尾），当视频提供者为 GGK 时使用">
+          <Input prefix={<LinkOutlined />} style={CODE_INPUT_STYLE} placeholder="例如 https://glk.jia4u.de/v1" allowClear />
         </Form.Item>
         <Form.Item label="GGK 视频模型" name="ggk_video_model" rules={[{ required: true, message: '请输入 GGK 视频模型' }]}>
           <Input prefix={<ApiOutlined />} style={CODE_INPUT_STYLE} allowClear />
@@ -64,8 +64,8 @@ export default function VideoTab() {
         <Form.Item label="GGK 请求超时（秒）" name="ggk_request_timeout_seconds" rules={[{ required: true, message: '请输入 GGK 请求超时' }]}>
           <InputNumber min={10} max={1200} style={{ width: '100%' }} />
         </Form.Item>
-        <Form.Item label="立绘 API Base URL" name="portrait_api_base_url" tooltip="OpenAI 兼容的图片生成 API 地址，用于角色立绘生成。">
-          <Input prefix={<ApiOutlined />} style={CODE_INPUT_STYLE} placeholder="https://api.x.ai" allowClear />
+        <Form.Item label="立绘 API Base URL" name="portrait_api_base_url" tooltip="OpenAI 兼容的图片生成 API 地址（必须以 /v1 结尾），用于角色立绘生成。">
+          <Input prefix={<ApiOutlined />} style={CODE_INPUT_STYLE} placeholder="例如 https://glk.jia4u.de/v1" allowClear />
         </Form.Item>
         <Form.Item label="立绘模型" name="portrait_image_model" rules={[{ required: true, message: '请输入立绘模型名称' }]}>
           <Input prefix={<ApiOutlined />} style={CODE_INPUT_STYLE} allowClear />

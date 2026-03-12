@@ -21,12 +21,11 @@ _RATIO_VALUES: dict[str, float] = {
     "9:16": 9 / 16,
     "16:9": 16 / 9,
 }
-_RESOLUTIONS: set[str] = {"SD", "HD"}
 _PRESETS: set[str] = {"fun", "normal", "spicy", "custom"}
 _DEFAULT_DURATION_PROFILE: dict[str, Any] = {
-    "min_seconds": 5,
-    "max_seconds": 6,
-    "allowed_seconds": [5, 6],
+    "min_seconds": 6,
+    "max_seconds": 15,
+    "allowed_seconds": [6, 10, 15],
     "prompt_hint_template": "请将该镜头时长控制在约 {seconds} 秒，保证动作节奏完整。",
 }
 
@@ -34,12 +33,14 @@ logger = logging.getLogger(__name__)
 
 
 def _build_v1_base_url(raw_base: str) -> str:
-    base = raw_base.strip().rstrip("/")
+    base = raw_base.strip()
     if not base:
         raise ValueError("GGK_BASE_URL 未配置，无法使用 GGK 视频提供者")
-    if base.endswith("/v1"):
-        return base
-    return f"{base}/v1"
+    if base.endswith("/"):
+        raise ValueError("GGK_BASE_URL 不能以 / 结尾，请填写 .../v1")
+    if not base.endswith("/v1"):
+        raise ValueError("GGK_BASE_URL 必须以 /v1 结尾，例如 https://glk.jia4u.de/v1")
+    return base
 
 
 def _to_root_base(base_url: str) -> str:
@@ -60,9 +61,13 @@ def _pick_aspect_ratio(width: int, height: int, configured: str) -> str:
     return min(_RATIO_VALUES, key=lambda ratio: abs(_RATIO_VALUES[ratio] - target))
 
 
-def _normalize_resolution(value: str) -> str:
-    candidate = value.strip().upper()
-    return candidate if candidate in _RESOLUTIONS else "SD"
+def _normalize_resolution_name(value: str) -> str:
+    raw = (value or "").strip()
+    if raw.lower() in {"480p", "720p"}:
+        return raw.lower()
+    if raw.upper() == "HD":
+        return "720p"
+    return "480p"
 
 
 def _normalize_preset(value: str) -> str:
@@ -172,7 +177,7 @@ def _extract_video_url(content: str) -> str | None:
 
 
 class GgkVideoProvider(VideoProvider):
-    """GGK 视频提供者，适配 /v1/chat/completions 的非流式视频生成。"""
+    """GGK 视频提供者，适配 /v1/chat/completions 的 SSE 流式视频生成。"""
 
     def __init__(self, output_dir: str = "./outputs/videos"):
         self._api_base = _build_v1_base_url(settings.ggk_base_url)
@@ -202,16 +207,23 @@ class GgkVideoProvider(VideoProvider):
         return dict(custom)
 
     def _resolve_video_length(self, requested_duration: float) -> int:
+        """解析 GGK 支持的视频时长（仅允许 6/10/15 秒）。"""
         profile = self._duration_profile
-        min_seconds = int(profile["min_seconds"])
-        max_seconds = int(profile["max_seconds"])
-        allowed_seconds: list[int] = profile.get("allowed_seconds") or []
+        min_seconds = int(profile.get("min_seconds") or _DEFAULT_DURATION_PROFILE["min_seconds"])
 
+        supported = {6, 10, 15}
+        allowed_seconds: list[int] = []
+        for raw in (profile.get("allowed_seconds") or []):
+            try:
+                parsed = int(round(float(raw)))
+            except (TypeError, ValueError):
+                continue
+            if parsed in supported:
+                allowed_seconds.append(parsed)
+
+        allowed_seconds = sorted(set(allowed_seconds)) or sorted(supported)
         requested = float(requested_duration or min_seconds)
-        if allowed_seconds:
-            nearest = min(allowed_seconds, key=lambda second: abs(second - requested))
-            return _to_int(nearest, default=min_seconds, min_value=min_seconds, max_value=max_seconds)
-        return _to_int(requested, default=min_seconds, min_value=min_seconds, max_value=max_seconds)
+        return min(allowed_seconds, key=lambda second: abs(second - requested))
 
     def _append_duration_hint(self, prompt: str, seconds: int) -> str:
         template = str(self._duration_profile.get("prompt_hint_template") or "").strip()
@@ -245,26 +257,19 @@ class GgkVideoProvider(VideoProvider):
         video_length = self._resolve_video_length(request.duration_seconds)
         prompt = self._append_duration_hint(prompt, video_length)
         aspect_ratio = _pick_aspect_ratio(request.width, request.height, settings.ggk_video_aspect_ratio)
-        payload_messages: list[dict[str, Any]] = []
-        if request.reference_image_url:
-            payload_messages.append({
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": prompt},
-                    {"type": "image_url", "image_url": {"url": request.reference_image_url}},
-                ],
-            })
-        else:
-            payload_messages.append({"role": "user", "content": prompt})
+        # 注意：当前接入的 GGK(OpenAI 兼容) 视频接口在 messages 中携带 image_url 时，
+        # 可能直接返回空内容并结束，导致无法解析视频链接；并且本地 /media/... 路径会触发 400。
+        # 因此此处暂时忽略 reference_image_url，仅使用文本 prompt，确保视频生成稳定可用。
+        payload_messages = [{"role": "user", "content": prompt}]
 
         payload = {
             "model": settings.ggk_video_model,
             "messages": payload_messages,
-            "stream": False,
+            "stream": True,
             "video_config": {
                 "aspect_ratio": aspect_ratio,
                 "video_length": video_length,
-                "resolution": _normalize_resolution(settings.ggk_video_resolution),
+                "resolution_name": _normalize_resolution_name(settings.ggk_video_resolution),
                 "preset": _normalize_preset(settings.ggk_video_preset),
             },
         }
@@ -274,17 +279,42 @@ class GgkVideoProvider(VideoProvider):
                      settings.ggk_video_model, video_length, aspect_ratio, endpoint)
         logger.debug("GGK 视频请求 payload: %s", str(payload)[:500])
         async with httpx.AsyncClient(timeout=settings.ggk_request_timeout_seconds) as client:
-            response = await client.post(endpoint, headers=self._headers(), json=payload)
-            if response.status_code >= 400:
-                error_body = response.text[:1000]
-                logger.error("GGK 视频 API 返回错误 %d: %s", response.status_code, error_body)
-                raise ValueError(
-                    f"GGK 视频 API 返回 {response.status_code}: {error_body}"
-                )
-            body = response.json()
+            collected_chunks: list[str] = []
+            stream_task_id: str | None = None
 
-        task_id = str(body.get("id") or uuid.uuid4())
-        content = _content_to_text(((body.get("choices") or [{}])[0].get("message") or {}).get("content"))
+            async with client.stream("POST", endpoint, headers=self._headers(), json=payload) as response:
+                if response.status_code >= 400:
+                    error_body = (await response.aread()).decode("utf-8", errors="replace")[:1000]
+                    logger.error("GGK 视频 API 返回错误 %d: %s", response.status_code, error_body)
+                    raise ValueError(f"GGK 视频 API 返回 {response.status_code}: {error_body}")
+
+                async for line in response.aiter_lines():
+                    text = (line or "").strip()
+                    if not text or not text.startswith("data:"):
+                        continue
+                    data_text = text[5:].strip()
+                    if not data_text:
+                        continue
+                    if data_text == "[DONE]":
+                        break
+
+                    try:
+                        chunk = json.loads(data_text)
+                    except json.JSONDecodeError:
+                        continue
+
+                    if stream_task_id is None:
+                        chunk_id = chunk.get("id")
+                        if isinstance(chunk_id, str) and chunk_id.strip():
+                            stream_task_id = chunk_id.strip()
+
+                    delta = ((chunk.get("choices") or [{}])[0].get("delta") or {})
+                    delta_content = delta.get("content")
+                    if isinstance(delta_content, str) and delta_content:
+                        collected_chunks.append(delta_content)
+
+        task_id = stream_task_id or str(uuid.uuid4())
+        content = "".join(collected_chunks)
         video_url = _extract_video_url(content)
         if not video_url:
             self._tasks[task_id] = VideoTaskStatus(

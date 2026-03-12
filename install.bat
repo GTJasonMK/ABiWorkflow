@@ -11,6 +11,8 @@ set "BACKEND_DIR=%~dp0backend"
 set "FRONTEND_DIR=%~dp0frontend"
 set "ENV_EXAMPLE=%~dp0.env.example"
 set "ENV_FILE=%~dp0.env"
+set "BACKEND_VENV_NAME=.venv-win"
+if defined ABI_BACKEND_VENV_NAME set "BACKEND_VENV_NAME=%ABI_BACKEND_VENV_NAME%"
 REM ------------------------------------------------------------
 
 echo ============================================================
@@ -26,7 +28,7 @@ if %errorlevel% neq 0 (
     echo   Install options:
     echo     1. pip install uv
     echo     2. winget install astral-sh.uv
-    echo     3. powershell -c "irm https://astral.sh/uv/install.ps1 | iex"
+    echo     3. powershell -c "irm https://astral.sh/uv/install.ps1 ^| iex"
     echo.
     exit /b 1
 )
@@ -65,16 +67,25 @@ if not exist "%BACKEND_DIR%\pyproject.toml" (
     exit /b 1
 )
 pushd "%BACKEND_DIR%"
-if not exist ".venv\Scripts\activate.bat" (
-    echo [INFO] Creating virtual environment ...
-    uv venv
-    if %errorlevel% neq 0 (
-        echo [ERROR] Failed to create virtual environment.
-        popd
-        exit /b 1
-    )
-    echo [OK] Virtual environment created at backend\.venv
+set "UV_PROJECT_ENVIRONMENT=%BACKEND_VENV_NAME%"
+if exist "%BACKEND_VENV_NAME%\Scripts\activate.bat" goto backend_venv_ready
+if exist ".venv\Scripts\activate.bat" (
+    echo [WARN] Detected legacy Windows virtual environment at backend\.venv
+    echo [WARN] New Windows installs use backend\%BACKEND_VENV_NAME% to avoid WSL/Linux conflicts.
 )
+if exist ".venv\bin\python" (
+    echo [WARN] Detected Linux/WSL virtual environment at backend\.venv
+    echo [WARN] Windows install will ignore it and create backend\%BACKEND_VENV_NAME%
+)
+echo [INFO] Creating virtual environment ...
+uv venv "%BACKEND_VENV_NAME%"
+if %errorlevel% neq 0 (
+    echo [ERROR] Failed to create virtual environment.
+    popd
+    exit /b 1
+)
+echo [OK] Virtual environment created at backend\%BACKEND_VENV_NAME%
+:backend_venv_ready
 echo [INFO] Installing Python dependencies ...
 uv sync --extra dev
 if %errorlevel% neq 0 (
@@ -123,7 +134,7 @@ echo  All dependencies installed successfully!
 echo ============================================================
 echo.
 echo  Next steps:
-echo    1. Edit .env with your API keys (LLM_PROVIDER, OPENAI_API_KEY, etc.)
+echo    1. Edit .env with your API keys (LLM_API_KEY, GGK_API_KEY, etc.)
 echo    2. Start Redis:  docker compose up -d
 echo    3. Run the app:  run.bat
 echo.

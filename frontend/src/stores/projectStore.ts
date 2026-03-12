@@ -12,8 +12,6 @@ interface ProjectState {
   page: number
   /** 加载状态 */
   loading: boolean
-  /** 当前项目详情 */
-  currentProject: Project | null
   /** 全局状态统计（各状态的项目数量） */
   stats: Record<string, number>
   /** 当前搜索/筛选/排序参数（不含分页） */
@@ -23,10 +21,6 @@ interface ProjectState {
   fetchProjects: (params?: ListProjectsParams) => Promise<void>
   /** 创建项目 */
   createProject: (name: string, description?: string) => Promise<Project>
-  /** 加载项目详情 */
-  fetchProject: (id: string) => Promise<void>
-  /** 更新项目 */
-  updateProject: (id: string, data: { name?: string; description?: string; script_text?: string }) => Promise<void>
   /** 删除项目 */
   deleteProject: (id: string) => Promise<void>
   /** 复制项目 */
@@ -38,7 +32,6 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   total: 0,
   page: 1,
   loading: false,
-  currentProject: null,
   stats: {},
   listParams: {},
 
@@ -67,21 +60,6 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     const project = await projectApi.createProject({ name, description })
     await get().fetchProjects({ page: get().page })
     return project
-  },
-
-  fetchProject: async (id) => {
-    set({ loading: true })
-    try {
-      const project = await projectApi.getProject(id)
-      set({ currentProject: project })
-    } finally {
-      set({ loading: false })
-    }
-  },
-
-  updateProject: async (id, data) => {
-    const project = await projectApi.updateProject(id, data)
-    set({ currentProject: project })
   },
 
   deleteProject: async (id) => {

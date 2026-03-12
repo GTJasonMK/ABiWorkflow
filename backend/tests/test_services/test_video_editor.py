@@ -112,7 +112,7 @@ def test_resolve_media_path_should_prefer_runtime_path_when_exists(tmp_path: Pat
     assert resolved == runtime_file.resolve()
 
 
-def test_resolve_media_path_should_fallback_to_cwd_when_runtime_path_missing(
+def test_resolve_media_path_should_return_runtime_path_when_runtime_path_missing(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -126,7 +126,7 @@ def test_resolve_media_path_should_fallback_to_cwd_when_runtime_path_missing(
     monkeypatch.setattr(video_editor_media, "resolve_runtime_path", lambda _value: runtime_file)
 
     resolved = video_editor_media.resolve_media_path("./outputs/videos/clip.mp4")
-    assert resolved == cwd_file.resolve()
+    assert resolved == runtime_file.resolve()
 
 
 def test_resolve_transition_should_map_known_and_unknown_hints():

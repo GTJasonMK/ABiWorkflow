@@ -5,7 +5,6 @@ from app.models.episode import Episode
 from app.models.panel import Panel
 from app.models.project import Project
 from app.models.provider_config import ProviderConfig
-from app.models.scene import Scene, SceneCharacter
 from app.models.script_asset import (
     EpisodeAssetOverride,
     PanelAssetOverride,
@@ -28,8 +27,6 @@ __all__ = [
     "Panel",
     "Project",
     "ProviderConfig",
-    "Scene",
-    "SceneCharacter",
     "ScriptEntity",
     "ScriptEntityAssetBinding",
     "EpisodeAssetOverride",

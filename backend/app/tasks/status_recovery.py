@@ -5,12 +5,20 @@ import logging
 from collections.abc import Awaitable
 from typing import TypeVar
 
-from sqlalchemy import update
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.config import resolve_database_url, settings
-from app.models import Project
+from app.services.project_status_ops import (
+    commit_project_status as commit_project_status_base,
+)
+from app.services.project_status_ops import (
+    restore_project_status_async,
+)
+from app.services.project_status_ops import (
+    rollback_and_restore_project_status as rollback_and_restore_project_status_base,
+)
 from app.tasks.task_record_sync import sync_task_record_status
+
+commit_project_status = commit_project_status_base
 
 T = TypeVar("T")
 
@@ -25,20 +33,17 @@ def run_async_in_new_loop(awaitable: Awaitable[T]) -> T:
         loop.close()
 
 
-async def restore_project_status_async(project_id: str, transient_status: str, fallback_status: str) -> None:
-    """将项目状态从瞬时状态回滚到稳定状态。"""
-    engine = create_async_engine(resolve_database_url(settings.database_url))
-    session_factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
-    try:
-        async with session_factory() as db:
-            await db.execute(
-                update(Project)
-                .where(Project.id == project_id, Project.status == transient_status)
-                .values(status=fallback_status)
-            )
-            await db.commit()
-    finally:
-        await engine.dispose()
+async def rollback_and_restore_project_status(
+    db: AsyncSession,
+    *,
+    project_id: str,
+    restore_status: str,
+):
+    return await rollback_and_restore_project_status_base(
+        db,
+        project_id=project_id,
+        restore_status=restore_status,
+    )
 
 
 def restore_project_status_after_task_failure(

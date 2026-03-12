@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 import app.api.system as system_api
 import app.services.runtime_settings as runtime_settings_service
 from app.config import settings
-from app.models import CompositionTask, Episode, Panel, Project, Scene, VideoClip
+from app.models import CompositionTask, Episode, Panel, Project, VideoClip
 
 
 @pytest.mark.asyncio
@@ -29,7 +29,6 @@ async def test_system_runtime_endpoint_should_return_runtime_summary(client: Asy
     assert "queue" in payload["data"]
     assert isinstance(payload["data"]["queue"]["celery_worker_online"], bool)
     assert payload["data"]["queue"]["queue_mode"] in {"redis", "sqlite"}
-    assert isinstance(payload["data"]["queue"]["fallback_active"], bool)
     assert "video" in payload["data"]
     assert payload["data"]["video"]["provider"] == settings.video_provider
     assert isinstance(payload["data"]["video"]["project_asset_publish_global_default"], bool)
@@ -108,18 +107,8 @@ async def test_project_assets_endpoint_should_return_assets_payload(
     )
     db_session.add(panel)
 
-    scene = Scene(
-        project_id=project.id,
-        sequence_order=0,
-        title="开场",
-        status="completed",
-        duration_seconds=5.0,
-    )
-    db_session.add(scene)
-    await db_session.flush()
-
     clip = VideoClip(
-        scene_id=scene.id,
+        panel_id=panel.id,
         clip_order=0,
         status="completed",
         duration_seconds=5.0,
@@ -163,7 +152,7 @@ async def test_project_assets_endpoint_should_return_assets_payload(
 
 
 @pytest.mark.asyncio
-async def test_project_assets_should_not_attach_scene_clips_when_mapping_count_mismatched(
+async def test_project_assets_should_ignore_orphan_clips_without_panel_binding(
     client: AsyncClient,
     db_session: AsyncSession,
 ):
@@ -186,41 +175,14 @@ async def test_project_assets_should_not_attach_scene_clips_when_mapping_count_m
     db_session.add(panel)
     await db_session.flush()
 
-    stray_scene = Scene(
-        project_id=project.id,
-        sequence_order=0,
-        title="历史残留场景",
+    db_session.add(VideoClip(
+        panel_id=str(uuid.uuid4()),
+        clip_order=0,
         status="completed",
         duration_seconds=5.0,
-    )
-    mapped_scene = Scene(
-        project_id=project.id,
-        sequence_order=1,
-        title="真实分镜场景",
-        status="completed",
-        duration_seconds=5.0,
-    )
-    db_session.add_all([stray_scene, mapped_scene])
-    await db_session.flush()
-
-    db_session.add_all([
-        VideoClip(
-            scene_id=stray_scene.id,
-            clip_order=0,
-            status="completed",
-            duration_seconds=5.0,
-            provider_task_id="stray-clip",
-            file_path="./outputs/videos/stray.mp4",
-        ),
-        VideoClip(
-            scene_id=mapped_scene.id,
-            clip_order=0,
-            status="completed",
-            duration_seconds=5.0,
-            provider_task_id="real-clip",
-            file_path="./outputs/videos/real.mp4",
-        ),
-    ])
+        provider_task_id="stray-clip",
+        file_path="./outputs/videos/stray.mp4",
+    ))
     await db_session.commit()
 
     response = await client.get(f"/api/projects/{project.id}/assets")
@@ -246,16 +208,6 @@ async def test_project_assets_summary_should_only_count_completed_compositions(
 ):
     project = Project(name="资产计数测试项目", status="parsed")
     db_session.add(project)
-    await db_session.flush()
-
-    scene = Scene(
-        project_id=project.id,
-        sequence_order=0,
-        title="测试场景",
-        status="generated",
-        duration_seconds=5.0,
-    )
-    db_session.add(scene)
     await db_session.flush()
 
     db_session.add_all([

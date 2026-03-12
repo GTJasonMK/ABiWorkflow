@@ -13,17 +13,7 @@ import { getApiBaseUrl } from '../../runtime'
 const { Text, Paragraph } = Typography
 
 function getProjectEntry(project: ProjectListItem): { path: string; label: string } {
-  switch (project.status) {
-    case 'parsed':
-      return { path: `/projects/${project.id}/scenes`, label: '进入分镜' }
-    case 'generating':
-      return { path: `/projects/${project.id}/generate`, label: '查看生成' }
-    case 'composing':
-    case 'completed':
-      return { path: `/projects/${project.id}/compose`, label: '查看合成' }
-    default:
-      return { path: `/projects/${project.id}/script`, label: '继续编辑' }
-  }
+  return { path: `/projects/${project.id}`, label: '进入项目' }
 }
 
 export default function Dashboard() {

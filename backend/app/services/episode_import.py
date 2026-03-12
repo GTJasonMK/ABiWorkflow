@@ -102,13 +102,12 @@ def detect_episode_markers(content: str) -> dict[str, Any]:
 def split_by_markers(content: str) -> dict[str, Any]:
     marker_result = detect_episode_markers(content)
     if not marker_result["has_markers"]:
-        fallback = split_by_paragraph_blocks(content)
         return {
-            "method": "heuristic",
+            "method": "markers",
             "has_markers": False,
             "marker_type": None,
-            "confidence": fallback.get("confidence", 0.3),
-            "episodes": fallback["episodes"],
+            "confidence": 0.0,
+            "episodes": [],
         }
 
     lines = content.splitlines()
@@ -138,16 +137,6 @@ def split_by_markers(content: str) -> dict[str, Any]:
         if normalized:
             episodes.append(normalized)
 
-    if not episodes:
-        fallback = split_by_paragraph_blocks(content)
-        return {
-            "method": "heuristic",
-            "has_markers": False,
-            "marker_type": None,
-            "confidence": fallback.get("confidence", 0.3),
-            "episodes": fallback["episodes"],
-        }
-
     return {
         "method": "markers",
         "has_markers": True,
@@ -155,47 +144,6 @@ def split_by_markers(content: str) -> dict[str, Any]:
         "confidence": marker_result["confidence"],
         "episodes": episodes,
     }
-
-
-def split_by_paragraph_blocks(content: str, *, target_episode_count: int = 6) -> dict[str, Any]:
-    raw_blocks = [part.strip() for part in re.split(r"\n\s*\n+", content) if part.strip()]
-    if not raw_blocks:
-        raw_blocks = [content.strip()]
-    raw_blocks = [block for block in raw_blocks if block]
-    if not raw_blocks:
-        return {"method": "heuristic", "confidence": 0.2, "episodes": []}
-
-    total_chars = sum(len(block) for block in raw_blocks)
-    target_chars = max(300, total_chars // max(1, min(target_episode_count, len(raw_blocks))))
-
-    merged: list[str] = []
-    current = ""
-    for block in raw_blocks:
-        if not current:
-            current = block
-            continue
-        if len(current) + len(block) <= target_chars:
-            current = f"{current}\n\n{block}"
-            continue
-        merged.append(current)
-        current = block
-    if current:
-        merged.append(current)
-
-    episodes: list[dict[str, Any]] = []
-    for idx, text in enumerate(merged):
-        normalized = _normalize_episode_item(
-            {
-                "title": f"第{idx + 1}集",
-                "summary": _build_summary(text),
-                "script_text": text,
-            },
-            index=idx,
-        )
-        if normalized:
-            episodes.append(normalized)
-
-    return {"method": "heuristic", "confidence": 0.45, "episodes": episodes}
 
 
 def _extract_llm_episodes_payload(raw: dict[str, Any]) -> list[dict[str, Any]]:
@@ -214,20 +162,19 @@ def _extract_llm_episodes_payload(raw: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 async def split_with_llm(content: str) -> dict[str, Any]:
-    """尝试使用 LLM 分集，失败时回退到规则切分。"""
+    """使用 LLM 分集；仅接受模型返回的有效结果。"""
     if not content.strip():
-        return {"method": "heuristic", "confidence": 0.0, "episodes": []}
+        return {"method": "llm", "confidence": 0.0, "episodes": []}
 
-    llm = None
+    llm = create_llm_adapter()
     try:
-        llm = create_llm_adapter()
         messages = [
             Message(
                 role="system",
                 content=(
                     "你是短剧分集助手。请将输入文案拆分为若干集，并仅输出 JSON："
-                    '{"episodes":[{"title":"第1集 标题","summary":"摘要","script_text":"该集完整正文"}]}。'
-                    "不要输出额外说明。script_text 必须保留原文语义。"
+                    '{"episodes":[{"title":"第1集 标题","summary":"摘要","script_text":"该集完整正文"}]}'
+                    "。不要输出额外说明。script_text 必须保留原文语义。"
                 ),
             ),
             Message(
@@ -238,22 +185,8 @@ async def split_with_llm(content: str) -> dict[str, Any]:
         response = await llm.complete(messages, temperature=0.2)
         parsed = extract_json_object(response.content)
         episodes = _extract_llm_episodes_payload(parsed)
-        if episodes:
-            return {"method": "llm", "confidence": 0.82, "episodes": episodes}
-    except Exception:
-        # 回退到规则切分，避免因模型失败阻断主流程。
-        pass
+        if not episodes:
+            raise ValueError("LLM 未返回有效分集结果")
+        return {"method": "llm", "confidence": 0.82, "episodes": episodes}
     finally:
-        if llm is not None:
-            await llm.close()
-
-    marker_split = split_by_markers(content)
-    if marker_split.get("episodes"):
-        marker_split["method"] = "llm_fallback"
-        marker_split["confidence"] = min(0.72, float(marker_split.get("confidence") or 0.5))
-        return marker_split
-
-    fallback = split_by_paragraph_blocks(content)
-    fallback["method"] = "llm_fallback"
-    fallback["confidence"] = min(0.65, float(fallback.get("confidence") or 0.45))
-    return fallback
+        await llm.close()

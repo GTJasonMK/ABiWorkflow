@@ -5,7 +5,6 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 from app.llm.base import LLMAdapter, LLMResponse, Message
-from app.services.script_parser import ScriptParserService
 
 
 def build_character(
@@ -114,9 +113,9 @@ class FakeTwoPhaseLLM(LLMAdapter):
         return None
 
 
-def build_parser_service(
+def build_fake_two_phase_llm(
     *,
     first_payload: dict[str, Any],
     second_payload: dict[str, Any],
-) -> ScriptParserService:
-    return ScriptParserService(FakeTwoPhaseLLM(first_payload=first_payload, second_payload=second_payload))
+) -> FakeTwoPhaseLLM:
+    return FakeTwoPhaseLLM(first_payload=first_payload, second_payload=second_payload)

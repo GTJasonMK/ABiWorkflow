@@ -11,27 +11,21 @@ from app.clip_status import CLIP_STATUS_COMPLETED, CLIP_STATUS_FAILED
 from app.composition_status import COMPOSITION_STATUS_COMPLETED
 from app.config import resolve_runtime_path, settings
 from app.database import get_db
-from app.models import CompositionTask, Episode, Panel, Project, Scene
+from app.models import CompositionTask, Episode, Panel, Project
 from app.schemas.common import ApiResponse
 
 router = APIRouter(tags=["媒体资产"])
 
 
 def _resolve_path(path_value: str | None) -> Path | None:
-    """将绝对/相对路径统一解析为绝对路径，兼容历史 cwd 差异。"""
+    """将绝对/相对路径统一解析为绝对路径。"""
     if not path_value:
         return None
     path = Path(path_value)
     if path.is_absolute():
         return path.resolve()
 
-    runtime_based = resolve_runtime_path(path)
-    cwd_based = (Path.cwd() / path).resolve()
-    if runtime_based.exists():
-        return runtime_based
-    if cwd_based.exists():
-        return cwd_based
-    return runtime_based
+    return resolve_runtime_path(path)
 
 
 def _to_media_url(file_path: str | None, root_dir: str, mount_prefix: str) -> str | None:
@@ -62,14 +56,8 @@ async def get_project_assets(project_id: str, db: AsyncSession = Depends(get_db)
         select(Panel)
         .join(Episode, Panel.episode_id == Episode.id)
         .where(Panel.project_id == project_id)
+        .options(selectinload(Panel.video_clips))
         .order_by(Episode.episode_order, Panel.panel_order, Panel.created_at)
-    )).scalars().all()
-
-    scenes = (await db.execute(
-        select(Scene)
-        .where(Scene.project_id == project_id)
-        .options(selectinload(Scene.video_clips))
-        .order_by(Scene.sequence_order, Scene.created_at)
     )).scalars().all()
 
     panel_payload: list[dict] = []
@@ -77,22 +65,8 @@ async def get_project_assets(project_id: str, db: AsyncSession = Depends(get_db)
     failed_clips = 0
     ready_clips = 0
 
-    scene_map: dict[int, Scene] = {}
-    if len(scenes) == len(panels):
-        candidate_map: dict[int, Scene] = {}
-        duplicate_found = False
-        for scene in scenes:
-            sequence_order = int(scene.sequence_order)
-            if sequence_order in candidate_map:
-                duplicate_found = True
-                break
-            candidate_map[sequence_order] = scene
-        if not duplicate_found and set(candidate_map) == set(range(len(panels))):
-            scene_map = candidate_map
-
-    for index, panel in enumerate(panels):
-        mapped_scene = scene_map.get(index)
-        clips = sorted((mapped_scene.video_clips if mapped_scene else []), key=lambda item: item.clip_order)
+    for panel in panels:
+        clips = sorted(panel.video_clips, key=lambda item: (item.clip_order, item.candidate_index, item.created_at))
         clip_payload: list[dict] = []
         for clip in clips:
             total_clips += 1

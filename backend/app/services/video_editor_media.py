@@ -5,12 +5,9 @@ from pathlib import Path
 from typing import Any, NotRequired, TypedDict
 
 from moviepy import CompositeVideoClip, TextClip, VideoFileClip, concatenate_videoclips
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.clip_status import CLIP_STATUS_COMPLETED
 from app.config import resolve_runtime_path, settings
-from app.models import Panel, Scene, VideoClip
+from app.models import Panel
 from app.services.video_editor_types import TransitionType
 
 logger = logging.getLogger(__name__)
@@ -27,18 +24,12 @@ class PanelAsset(TypedDict):
 
 
 def resolve_media_path(path_value: str | Path) -> Path:
-    """解析媒体文件路径，优先运行时稳定路径，兼容历史 cwd 相对路径。"""
+    """解析媒体文件路径，统一按运行时根目录解析。"""
     raw = Path(path_value)
     if raw.is_absolute():
         return raw.resolve()
 
-    runtime_based = resolve_runtime_path(raw)
-    cwd_based = (Path.cwd() / raw).resolve()
-    if runtime_based.exists():
-        return runtime_based
-    if cwd_based.exists():
-        return cwd_based
-    return runtime_based
+    return resolve_runtime_path(raw)
 
 
 def resolve_panel_media_source(media_value: str | None) -> str | None:
@@ -150,50 +141,6 @@ def add_subtitles(
     if subtitle_clips:
         return CompositeVideoClip([video] + subtitle_clips)
     return video
-
-
-async def collect_scene_assets(
-    scenes: list[Scene],
-    db: AsyncSession,
-) -> tuple[list[PanelAsset], list[str]]:
-    """收集场景可用片段，返回统一的分镜素材结构与缺失标题。"""
-    scene_assets: list[PanelAsset] = []
-    missing_scenes: list[str] = []
-
-    for scene in scenes:
-        clips = (await db.execute(
-            select(VideoClip)
-            .where(
-                VideoClip.scene_id == scene.id,
-                VideoClip.status == CLIP_STATUS_COMPLETED,
-                VideoClip.is_selected == True,  # noqa: E712
-            )
-            .order_by(VideoClip.clip_order)
-        )).scalars().all()
-
-        scene_clip_paths: list[str] = []
-        scene_duration = 0.0
-        for clip in clips:
-            if clip.file_path:
-                clip_path = resolve_media_path(clip.file_path)
-                if clip_path.exists():
-                    scene_clip_paths.append(str(clip_path))
-                    scene_duration += float(clip.duration_seconds or 0.0)
-
-        if not scene_clip_paths:
-            missing_scenes.append(scene.title)
-            continue
-
-        scene_assets.append({
-            "panel_id": scene.id,
-            "panel_title": scene.title,
-            "clip_paths": scene_clip_paths,
-            "duration": max(scene_duration, 0.1),
-            "dialogue": scene.dialogue,
-            "transition_hint": scene.transition_hint,
-        })
-
-    return scene_assets, missing_scenes
 
 
 async def collect_panel_assets(

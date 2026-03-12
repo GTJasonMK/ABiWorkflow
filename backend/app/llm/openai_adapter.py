@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 
 class OpenAIAdapter(LLMAdapter):
-    """OpenAI LLM 适配器"""
+    """OpenAI Chat Completions 适配器。"""
 
     def __init__(self, api_key: str, model: str = "gpt-4o", base_url: str | None = None):
         self._client = AsyncOpenAI(api_key=api_key, base_url=base_url)
@@ -24,22 +24,21 @@ class OpenAIAdapter(LLMAdapter):
         response_format: type[BaseModel] | None = None,
         temperature: float = 0.7,
     ) -> LLMResponse:
-        """发送消息，支持结构化 JSON 输出"""
+        """发送消息并获取完整回复。"""
         api_messages = [{"role": m.role, "content": m.content} for m in messages]
 
         kwargs: dict = {
             "model": self._model,
             "messages": api_messages,
-            "temperature": temperature,
             "stream": False,
         }
 
-        if response_format is not None:
-            # 使用 JSON mode 并在系统提示中要求 JSON 格式
-            kwargs["response_format"] = {"type": "json_object"}
-
-        logger.info("LLM 请求: model=%s, messages=%d条, temperature=%.1f",
-                     self._model, len(api_messages), temperature)
+        logger.info("LLM 请求: model=%s, messages=%d条", self._model, len(api_messages))
+        logger.debug(
+            "LLM 请求附加参数已在传输层忽略: response_format=%s, temperature=%s",
+            response_format is not None,
+            temperature,
+        )
         response = await self._client.chat.completions.create(**kwargs)
 
         if isinstance(response, str):

@@ -9,8 +9,22 @@ export function resolveBindingEpisodeId(binding: ScriptAssetBinding): string | n
   return text || null
 }
 
-export function bindingMatchesEpisode(binding: ScriptAssetBinding, episodeId: string): boolean {
-  return resolveBindingEpisodeId(binding) === episodeId
+export function bindingHasEpisodeScope(binding: ScriptAssetBinding): boolean {
+  return resolveBindingEpisodeId(binding) !== null
+}
+
+export function bindingIsSharedDefault(binding: ScriptAssetBinding): boolean {
+  return !bindingHasEpisodeScope(binding)
+}
+
+export function bindingMatchesEpisode(
+  binding: ScriptAssetBinding,
+  episodeId: string,
+  options?: { includeSharedDefault?: boolean },
+): boolean {
+  const bindingEpisodeId = resolveBindingEpisodeId(binding)
+  if (bindingEpisodeId === episodeId) return true
+  return Boolean(options?.includeSharedDefault) && bindingEpisodeId === null
 }
 
 export function bindingBelongsToEpisodeScope(
@@ -18,7 +32,7 @@ export function bindingBelongsToEpisodeScope(
   scopeEpisodeId?: string | null,
 ): boolean {
   if (!scopeEpisodeId) return true
-  return bindingMatchesEpisode(binding, scopeEpisodeId)
+  return resolveBindingEpisodeId(binding) === scopeEpisodeId
 }
 
 export function normalizeBindingForEpisodeScope(

@@ -1,87 +1,41 @@
 import { useState } from 'react'
 import { Button, Image, List, Space, Tag, Tooltip, Typography, App as AntdApp } from 'antd'
 import { generatePanelVoiceLines, submitPanelLipsync, submitPanelVideo } from '../../api/panels'
+import type { Episode } from '../../types/episode'
 import type { Panel } from '../../types/panel'
+import { summarizePanelBinding } from '../../utils/panelBinding'
 import PanelStatusTag from '../../components/PanelStatusTag'
-import ProviderKeyPromptModal from '../../components/ProviderKeyPromptModal'
 import { getApiErrorMessage } from '../../utils/error'
 
 const { Text } = Typography
 type PanelSubmitMode = 'video' | 'tts' | 'lipsync'
 
 interface PanelGenerationCardProps {
+  episode: Episode | null
   panels: Panel[]
   onRefresh: () => Promise<void>
 }
 
-interface PanelAssetBindingView {
-  characterNames: string[]
-  locationNames: string[]
-  voiceName?: string
-  voiceId?: string
-  effectivePrompt?: string
-  effectiveReferenceImageUrl?: string
-  compiled: boolean
-}
-
-function parsePanelAssetBinding(panel: Panel): PanelAssetBindingView {
-  const effective = panel.effective_binding
-  if (!effective || typeof effective !== 'object') {
-    return {
-      characterNames: [],
-      locationNames: [],
-      compiled: false,
-    }
-  }
-  const source = effective as unknown as Record<string, unknown>
-  const chars = Array.isArray(source.characters) ? source.characters : []
-  const locations = Array.isArray(source.locations) ? source.locations : []
-  const effectiveVoice = (source.effective_voice && typeof source.effective_voice === 'object' && !Array.isArray(source.effective_voice))
-    ? source.effective_voice as Record<string, unknown>
-    : null
-  const characterNames = chars
-    .map((item) => (item && typeof item === 'object' ? (item as Record<string, unknown>).asset_name : null))
-    .filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
-  const locationNames = locations
-    .map((item) => (item && typeof item === 'object' ? (item as Record<string, unknown>).asset_name : null))
-    .filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
-  return {
-    characterNames,
-    locationNames,
-    voiceName: typeof effectiveVoice?.voice_name === 'string' ? effectiveVoice.voice_name : undefined,
-    voiceId: typeof effectiveVoice?.voice_id === 'string' ? effectiveVoice.voice_id : undefined,
-    effectivePrompt: typeof source.effective_visual_prompt === 'string' ? source.effective_visual_prompt : undefined,
-    effectiveReferenceImageUrl: typeof source.effective_reference_image_url === 'string' ? source.effective_reference_image_url : undefined,
-    compiled: true,
-  }
-}
-
-export default function PanelGenerationCard({ panels, onRefresh }: PanelGenerationCardProps) {
+export default function PanelGenerationCard({ episode, panels, onRefresh }: PanelGenerationCardProps) {
   const [submittingAction, setSubmittingAction] = useState<{ panelId: string; mode: PanelSubmitMode } | null>(null)
-  const [providerPrompt, setProviderPrompt] = useState<{ panel: Panel; mode: PanelSubmitMode } | null>(null)
   const { message } = AntdApp.useApp()
 
-  const handleConfirmPanelProvider = async (providerKey: string) => {
-    if (!providerPrompt) return
-    const { panel, mode } = providerPrompt
-
+  const handleSubmitTask = async (panel: Panel, mode: PanelSubmitMode) => {
     setSubmittingAction({ panelId: panel.id, mode })
     try {
       const result = mode === 'video'
-        ? await submitPanelVideo(panel.id, { provider_key: providerKey, payload: {} })
+        ? await submitPanelVideo(panel.id, { payload: {} })
         : mode === 'tts'
-          ? await generatePanelVoiceLines(panel.id, { provider_key: providerKey, payload: {} })
-          : await submitPanelLipsync(panel.id, { provider_key: providerKey, payload: {} })
+          ? await generatePanelVoiceLines(panel.id, { payload: {} })
+          : await submitPanelLipsync(panel.id, { payload: {} })
       const task = (result.task ?? {}) as { id?: string; source_task_id?: string }
       const taskName = task.id || task.source_task_id || '未知'
-      const modeLabel = mode === 'video' ? '分镜视频' : mode === 'tts' ? '语音' : '口型同步'
+      const modeLabel = mode === 'video' ? '视频' : mode === 'tts' ? '语音' : '口型同步'
       message.success(`${modeLabel}任务已提交：${taskName}`)
       await onRefresh()
-      setProviderPrompt(null)
     } catch (error) {
-      const fallback = mode === 'video' ? '提交分镜生成失败' : mode === 'tts' ? '提交语音生成失败' : '提交口型同步失败'
+      const fallback = mode === 'video' ? '提交视频生成失败' : mode === 'tts' ? '提交语音生成失败' : '提交口型同步失败'
       message.error(getApiErrorMessage(error, fallback))
-      throw error
     } finally {
       setSubmittingAction(null)
     }
@@ -96,24 +50,31 @@ export default function PanelGenerationCard({ panels, onRefresh }: PanelGenerati
           size="small"
           dataSource={panels}
           renderItem={(panel) => {
-            const binding = parsePanelAssetBinding(panel)
-            const promptPreview = (binding.effectivePrompt || panel.visual_prompt || panel.script_text || '').trim()
-            const referenceImageUrl = binding.effectiveReferenceImageUrl || panel.reference_image_url
+            const binding = summarizePanelBinding(panel)
+            const promptPreview = (binding.effectivePrompt ?? '').trim()
+            const referenceImageUrl = binding.effectiveReferenceImageUrl ?? null
+            const videoProviderReady = Boolean(episode?.video_provider_key)
+            const ttsProviderReady = Boolean(episode?.tts_provider_key)
+            const lipsyncProviderReady = Boolean(episode?.lipsync_provider_key)
 
             return (
               <List.Item
                 actions={[
                   <Tooltip
                     key="video-tip"
-                    title={(!panel.visual_prompt && !panel.script_text) ? '缺少 visual_prompt / script_text' : '提交分镜视频生成任务'}
+                    title={!videoProviderReady
+                      ? '当前分集未配置视频 Provider'
+                      : (!panel.visual_prompt && !panel.script_text)
+                        ? '缺少 visual_prompt / script_text'
+                        : '提交视频生成任务'}
                   >
                     <span>
                       <Button
                         size="small"
                         type="primary"
                         loading={submittingAction?.panelId === panel.id && submittingAction.mode === 'video'}
-                        disabled={!panel.visual_prompt && !panel.script_text}
-                        onClick={() => setProviderPrompt({ panel, mode: 'video' })}
+                        disabled={!videoProviderReady || (!panel.visual_prompt && !panel.script_text)}
+                        onClick={() => { void handleSubmitTask(panel, 'video') }}
                         aria-label={`为分镜"${panel.title}"生成视频`}
                       >
                         视频
@@ -122,14 +83,18 @@ export default function PanelGenerationCard({ panels, onRefresh }: PanelGenerati
                   </Tooltip>,
                   <Tooltip
                     key="tts-tip"
-                    title={(!panel.tts_text && !panel.script_text) ? '缺少 tts_text / script_text' : '提交语音生成任务'}
+                    title={!ttsProviderReady
+                      ? '当前分集未配置语音 Provider'
+                      : (!panel.tts_text && !panel.script_text)
+                        ? '缺少 tts_text / script_text'
+                        : '提交语音生成任务'}
                   >
                     <span>
                       <Button
                         size="small"
                         loading={submittingAction?.panelId === panel.id && submittingAction.mode === 'tts'}
-                        disabled={!panel.tts_text && !panel.script_text}
-                        onClick={() => setProviderPrompt({ panel, mode: 'tts' })}
+                        disabled={!ttsProviderReady || (!panel.tts_text && !panel.script_text)}
+                        onClick={() => { void handleSubmitTask(panel, 'tts') }}
                         aria-label={`为分镜"${panel.title}"生成语音`}
                       >
                         语音
@@ -138,14 +103,18 @@ export default function PanelGenerationCard({ panels, onRefresh }: PanelGenerati
                   </Tooltip>,
                   <Tooltip
                     key="lipsync-tip"
-                    title={(!panel.video_url || !panel.tts_audio_url) ? '口型同步需要 video_url + tts_audio_url' : '提交口型同步任务'}
+                    title={!lipsyncProviderReady
+                      ? '当前分集未配置口型同步 Provider'
+                      : (!panel.video_url || !panel.tts_audio_url)
+                        ? '口型同步需要 video_url + tts_audio_url'
+                        : '提交口型同步任务'}
                   >
                     <span>
                       <Button
                         size="small"
                         loading={submittingAction?.panelId === panel.id && submittingAction.mode === 'lipsync'}
-                        disabled={!panel.video_url || !panel.tts_audio_url}
-                        onClick={() => setProviderPrompt({ panel, mode: 'lipsync' })}
+                        disabled={!lipsyncProviderReady || !panel.video_url || !panel.tts_audio_url}
+                        onClick={() => { void handleSubmitTask(panel, 'lipsync') }}
                         aria-label={`为分镜"${panel.title}"生成口型同步`}
                       >
                         口型
@@ -161,6 +130,15 @@ export default function PanelGenerationCard({ panels, onRefresh }: PanelGenerati
                     <Text type="secondary">{panel.duration_seconds.toFixed(1)} 秒</Text>
                     {panel.video_url && <Tag className="np-status-tag">有视频</Tag>}
                     {panel.tts_audio_url && <Tag className="np-status-tag">有语音</Tag>}
+                  </Space>
+
+                  <Space size={8} wrap>
+                    <Tag className="np-status-tag">视频阶段</Tag>
+                    <PanelStatusTag status={panel.video_status} />
+                    <Tag className="np-status-tag">语音阶段</Tag>
+                    <PanelStatusTag status={panel.tts_status} />
+                    <Tag className="np-status-tag">口型阶段</Tag>
+                    <PanelStatusTag status={panel.lipsync_status} />
                   </Space>
 
                   <Space size={8} wrap>
@@ -216,36 +194,6 @@ export default function PanelGenerationCard({ panels, onRefresh }: PanelGenerati
           }}
         />
       )}
-
-      <ProviderKeyPromptModal
-        open={!!providerPrompt}
-        title={
-          providerPrompt?.mode === 'video'
-            ? '输入分镜视频 Provider Key'
-            : providerPrompt?.mode === 'tts'
-              ? '输入语音生成 Provider Key'
-              : '输入口型同步 Provider Key'
-        }
-        description={providerPrompt ? `分镜：${providerPrompt.panel.title}` : undefined}
-        defaultValue={
-          providerPrompt?.mode === 'video'
-            ? 'video.ggk'
-            : providerPrompt?.mode === 'tts'
-              ? 'tts.ggk'
-              : 'lipsync.ggk'
-        }
-        okText="提交"
-        cancelText="取消"
-        recentStorageKey={
-          providerPrompt?.mode === 'video'
-            ? 'abi_recent_panel_video_provider_keys'
-            : providerPrompt?.mode === 'tts'
-              ? 'abi_recent_panel_tts_provider_keys'
-              : 'abi_recent_panel_lipsync_provider_keys'
-        }
-        onCancel={() => setProviderPrompt(null)}
-        onConfirm={handleConfirmPanelProvider}
-      />
     </>
   )
 }

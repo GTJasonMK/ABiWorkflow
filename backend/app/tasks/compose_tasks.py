@@ -12,6 +12,7 @@ from app.project_status import (
 from app.services.progress import publish_progress
 from app.tasks.celery_app import celery_app
 from app.tasks.status_recovery import (
+    commit_project_status,
     mark_worker_task_completed,
     mark_worker_task_failed,
     mark_worker_task_started,
@@ -65,52 +66,49 @@ async def _run_compose(
 ) -> dict:
     """执行异步视频合成逻辑"""
     from sqlalchemy import select
-    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-    from app.config import resolve_database_url, settings
     from app.models import Project
     from app.services.composition_state import mark_completed_compositions_stale
     from app.services.video_editor import CompositionOptions, VideoEditorService
+    from app.tasks.db_session import task_session
 
     # 将 dict 转换为 CompositionOptions
     composition_options = CompositionOptions(**(options_dict or {}))
 
-    engine = create_async_engine(resolve_database_url(settings.database_url))
-    session_factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    async with task_session() as db:
+        project = (await db.execute(
+            select(Project).where(Project.id == project_id)
+        )).scalar_one()
 
-    try:
-        async with session_factory() as db:
-            project = (await db.execute(
-                select(Project).where(Project.id == project_id)
-            )).scalar_one()
+        await commit_project_status(db, project, PROJECT_STATUS_COMPOSING)
 
-            project.status = PROJECT_STATUS_COMPOSING
-            await db.commit()
+        try:
+            editor = VideoEditorService()
+            composition_id = await editor.compose(project_id, composition_options, db, episode_id=episode_id)
+            await mark_completed_compositions_stale(
+                db,
+                project_id,
+                episode_id=episode_id,
+                exclude_composition_id=composition_id,
+            )
 
-            try:
-                editor = VideoEditorService()
-                composition_id = await editor.compose(project_id, composition_options, db, episode_id=episode_id)
-                await mark_completed_compositions_stale(
-                    db,
-                    project_id,
-                    episode_id=episode_id,
-                    exclude_composition_id=composition_id,
-                )
-
-                project.status = resolve_post_composition_status(
+            await commit_project_status(
+                db,
+                project,
+                resolve_post_composition_status(
                     previous_status,
                     scoped_to_episode=bool(episode_id),
-                )
-                await db.commit()
+                ),
+            )
 
-                return {"composition_id": composition_id, "episode_id": episode_id}
-            except ValueError:
-                project.status = previous_status
-                await db.commit()
-                raise
-            except Exception:
-                project.status = resolve_composition_failure_status(previous_status, scoped_to_episode=bool(episode_id))
-                await db.commit()
-                raise
-    finally:
-        await engine.dispose()
+            return {"composition_id": composition_id, "episode_id": episode_id}
+        except ValueError:
+            await commit_project_status(db, project, previous_status)
+            raise
+        except Exception:
+            await commit_project_status(
+                db,
+                project,
+                resolve_composition_failure_status(previous_status, scoped_to_episode=bool(episode_id)),
+            )
+            raise

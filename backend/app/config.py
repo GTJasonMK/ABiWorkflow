@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from pydantic import model_validator
+from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings
 
 
@@ -56,7 +56,8 @@ class Settings(BaseSettings):
     # 数据库
     database_url: str = "sqlite+aiosqlite:///./abi_workflow.db"
 
-    # LLM 配置（根据模型名自动检测 API 格式：含 claude 使用 Anthropic，其余使用 OpenAI 兼容）
+    # LLM 配置（显式 provider，不做“按模型名猜测/兼容”）
+    llm_provider: str = "openai"  # openai | anthropic
     llm_api_key: str = ""
     llm_model: str = "gpt-4o"
     llm_base_url: str | None = None
@@ -112,6 +113,14 @@ class Settings(BaseSettings):
     model_capability_profiles: str = "{}"
 
     model_config = {"env_file": "../.env", "env_file_encoding": "utf-8", "extra": "ignore"}
+
+    @field_validator("llm_provider")
+    @classmethod
+    def _validate_llm_provider(cls, value: str) -> str:
+        normalized = (value or "").strip().lower()
+        if normalized in {"openai", "anthropic"}:
+            return normalized
+        raise ValueError("llm_provider 必须是 openai 或 anthropic")
 
     @model_validator(mode="before")
     @classmethod

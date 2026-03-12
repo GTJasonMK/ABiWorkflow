@@ -13,10 +13,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.project_common import get_episode_in_project_or_404, get_project_or_404
 from app.api.project_status import (
     claim_project_status_or_409,
-    force_recover_project_status,
+    commit_project_status,
     restore_project_status_and_raise_submit_error,
 )
 from app.api.task_mode import resolve_async_mode
+from app.api.task_submission import submit_async_task_with_record
 from app.composition_status import COMPOSITION_STATUS_COMPLETED
 from app.config import resolve_runtime_path
 from app.database import get_db
@@ -24,7 +25,6 @@ from app.models import CompositionTask, Project
 from app.project_status import (
     PROJECT_COMPOSE_ALLOWED_FROM,
     PROJECT_STATUS_COMPOSING,
-    PROJECT_STATUS_PARSED,
     resolve_composition_failure_status,
     resolve_post_composition_status,
 )
@@ -88,9 +88,7 @@ def _resolve_output_file_path(path_value: str) -> Path:
     if raw_path.is_absolute():
         return raw_path.resolve()
 
-    runtime_based = resolve_runtime_path(raw_path)
-    cwd_based = (Path.cwd() / raw_path).resolve()
-    return runtime_based if runtime_based.exists() or not cwd_based.exists() else cwd_based
+    return resolve_runtime_path(raw_path)
 
 
 def _build_compose_result_payload(composition_id: str, episode_id: str | None) -> dict:
@@ -98,6 +96,10 @@ def _build_compose_result_payload(composition_id: str, episode_id: str | None) -
         "composition_id": composition_id,
         "episode_id": episode_id,
     }
+
+
+async def _load_project_for_update(project_id: str, db: AsyncSession) -> Project:
+    return (await db.execute(select(Project).where(Project.id == project_id))).scalar_one()
 
 
 async def _update_episode_compose_task(
@@ -118,6 +120,16 @@ async def _update_episode_compose_task(
         result=result,
         error_message=error_message,
         event_type="completed" if status == "completed" else "failed",
+    )
+
+
+async def _fail_episode_compose_task(db: AsyncSession, task, error_message: str) -> None:
+    await _update_episode_compose_task(
+        db,
+        task,
+        status="failed",
+        message="分集合成失败",
+        error_message=error_message,
     )
 
 
@@ -181,7 +193,6 @@ async def start_composition(
     options: CompositionOptions | None = None,
     episode_id: str | None = Query(None, description="可选：仅合成指定分集"),
     async_mode: bool = Query(False, description="是否异步执行合成"),
-    force_recover: bool = Query(False, description="是否强制恢复卡住的 composing 状态"),
     db: AsyncSession = Depends(get_db),
 ):
     """启动视频合成"""
@@ -194,15 +205,10 @@ async def start_composition(
     except ValueError as err:
         raise HTTPException(status_code=400, detail=str(err)) from err
 
-    if force_recover:
-        await force_recover_project_status(
-            db,
-            project=project,
-            busy_status=PROJECT_STATUS_COMPOSING,
-            recovered_status=PROJECT_STATUS_PARSED,
-        )
+    if episode_id and async_mode:
+        raise HTTPException(status_code=400, detail="分集合成暂不支持异步执行")
+    async_mode = False if episode_id else resolve_async_mode(async_mode)
 
-    # 在强制恢复后再记录回滚目标，避免提交失败时误回滚到 composing。
     previous_status = project.status
 
     await claim_project_status_or_409(
@@ -211,35 +217,32 @@ async def start_composition(
         target_status=PROJECT_STATUS_COMPOSING,
         allowed_from_statuses=PROJECT_COMPOSE_ALLOWED_FROM,
         action_label="启动合成",
-        recover_hint_status=PROJECT_STATUS_COMPOSING,
     )
     await db.commit()
 
     composition_options = options or CompositionOptions()
-    async_mode = False if episode_id else resolve_async_mode(async_mode)
     sync_scope_task = None
 
     if async_mode:
         try:
             from app.tasks.compose_tasks import compose_video_task
 
-            task = compose_video_task.delay(project_id, composition_options.model_dump(), previous_status, episode_id)
-            await create_task_record(
+            return ApiResponse(data=await submit_async_task_with_record(
                 db,
+                submit=lambda: compose_video_task.delay(
+                    project_id,
+                    composition_options.model_dump(),
+                    previous_status,
+                    episode_id,
+                ),
                 task_type="compose",
                 target_type="episode" if episode_id else "project",
                 target_id=episode_id or project_id,
                 project_id=project_id,
                 episode_id=episode_id,
-                source_task_id=task.id,
-                status="pending",
                 message="合成任务已排队",
-                payload={
-                    **_build_compose_task_payload(project_id, episode_id, composition_options),
-                },
-            )
-            await db.commit()
-            return ApiResponse(data={"task_id": task.id, "mode": "async", "status": "queued"})
+                payload=_build_compose_task_payload(project_id, episode_id, composition_options),
+            ))
         except Exception as e:
             await restore_project_status_and_raise_submit_error(
                 db,
@@ -273,8 +276,7 @@ async def start_composition(
             episode_id=episode_id,
             exclude_composition_id=task_id,
         )
-        project = (await db.execute(select(Project).where(Project.id == project_id))).scalar_one()
-        project.status = resolve_post_composition_status(previous_status, scoped_to_episode=bool(episode_id))
+        project = await _load_project_for_update(project_id, db)
         result_payload = _build_compose_result_payload(task_id, episode_id)
         if sync_scope_task is not None:
             await _update_episode_compose_task(
@@ -284,36 +286,30 @@ async def start_composition(
                 message="分集合成完成",
                 result=result_payload,
             )
-        await db.commit()
+        await commit_project_status(
+            db,
+            project,
+            resolve_post_composition_status(previous_status, scoped_to_episode=bool(episode_id)),
+        )
         return ApiResponse(data=result_payload)
     except ValueError as e:
-        project = (await db.execute(select(Project).where(Project.id == project_id))).scalar_one()
-        project.status = previous_status
+        project = await _load_project_for_update(project_id, db)
         if sync_scope_task is not None:
-            await _update_episode_compose_task(
-                db,
-                sync_scope_task,
-                status="failed",
-                message="分集合成失败",
-                error_message=str(e),
-            )
-        await db.commit()
+            await _fail_episode_compose_task(db, sync_scope_task, str(e))
+        await commit_project_status(db, project, previous_status)
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         tb = traceback.format_exc()
         logger.exception("视频合成失败: project=%s", project_id)
         _write_compose_error_log(tb)
-        project = (await db.execute(select(Project).where(Project.id == project_id))).scalar_one()
-        project.status = resolve_composition_failure_status(previous_status, scoped_to_episode=bool(episode_id))
+        project = await _load_project_for_update(project_id, db)
         if sync_scope_task is not None:
-            await _update_episode_compose_task(
-                db,
-                sync_scope_task,
-                status="failed",
-                message="分集合成失败",
-                error_message=str(e),
-            )
-        await db.commit()
+            await _fail_episode_compose_task(db, sync_scope_task, str(e))
+        await commit_project_status(
+            db,
+            project,
+            resolve_composition_failure_status(previous_status, scoped_to_episode=bool(episode_id)),
+        )
         raise HTTPException(status_code=500, detail=f"合成失败: {e}\n\n--- traceback ---\n{tb}")
 
 

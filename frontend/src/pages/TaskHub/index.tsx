@@ -1,5 +1,5 @@
 import { useMemo } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate, useSearchParams } from 'react-router-dom'
 import { App as AntdApp, Button, Card, Empty, Space, Tag } from 'antd'
 import { ReloadOutlined, RocketOutlined } from '@ant-design/icons'
 import PageHeader from '../../components/PageHeader'
@@ -11,11 +11,21 @@ import useTaskRecords from '../../hooks/useTaskRecords'
 
 export default function TaskHub() {
   const navigate = useNavigate()
+  const [searchParams] = useSearchParams()
   const { message } = AntdApp.useApp()
+  const projectId = (searchParams.get('project_id') || '').trim() || undefined
+  const episodeId = (searchParams.get('episode_id') || '').trim() || undefined
+  const panelId = (searchParams.get('panel_id') || '').trim() || undefined
+  const status = (searchParams.get('status') || '').trim() || undefined
+  const hasScopedFilter = Boolean(projectId || episodeId || panelId || status)
   const { tasks, loading, refresh } = useTaskRecords({
     enabled: true,
     limit: 200,
     includeDismissed: false,
+    projectId,
+    episodeId,
+    panelId,
+    status,
     onError: (error) => {
       message.error(getApiErrorMessage(error, '加载后端任务记录失败'))
     },
@@ -32,15 +42,20 @@ export default function TaskHub() {
       <PageHeader
         kicker="任务编排"
         title="全局任务中心"
-        subtitle="以全局视角统一查看解析、生成、合成任务状态，并支持手动刷新和清理。"
+        subtitle="以全局视角统一查看解析、生成、合成与 Provider 任务状态；外部 Provider 任务支持查看与失败后重试，不在任务中心内取消。"
         actions={(
           <Space>
+            {hasScopedFilter ? (
+              <Button onClick={() => navigate('/tasks')}>
+                清空筛选
+              </Button>
+            ) : null}
             <Button
               disabled={failedTaskIds.length === 0}
               onClick={() => {
                 void (async () => {
                   try {
-                    const result = await dismissFailedTaskRecords({ task_ids: failedTaskIds })
+                    const result = await dismissFailedTaskRecords({ project_id: projectId, task_ids: failedTaskIds })
                     await refresh({ showLoading: false })
                     message.success(`已忽略失败任务 ${result.dismissed} 条`)
                   } catch (error) {
@@ -61,7 +76,11 @@ export default function TaskHub() {
       <div className="np-page-scroll">
         <Card size="small" className="np-panel-card" style={{ marginBottom: 12 }}>
           <Space size={12} wrap align="center">
-            <Tag className="np-status-tag">当前视角：全局</Tag>
+            <Tag className="np-status-tag">当前视角：{hasScopedFilter ? '筛选结果' : '全局'}</Tag>
+            {projectId ? <Tag className="np-status-tag">项目：{projectId.slice(0, 8)}</Tag> : null}
+            {episodeId ? <Tag className="np-status-tag">分集：{episodeId.slice(0, 8)}</Tag> : null}
+            {panelId ? <Tag className="np-status-tag">分镜：{panelId.slice(0, 8)}</Tag> : null}
+            {status ? <Tag className="np-status-tag">状态：{status}</Tag> : null}
             <Tag className="np-status-tag">任务数：{sortedTasks.length}</Tag>
           </Space>
         </Card>

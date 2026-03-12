@@ -185,30 +185,30 @@ class VideoEditorService:
         # 单次编码写入：视频 + 字幕 + TTS 音频一次性合成输出
         def _do_compose():
             # 加载分镜片段（分镜内按单片段处理）
-            scene_videos: list[VideoFileClip | CompositeVideoClip] = []
+            panel_videos: list[VideoFileClip | CompositeVideoClip] = []
             for asset in panel_assets:
                 try:
-                    scene_video = load_panel_clip(asset["clip_paths"])
+                    panel_video = load_panel_clip(asset["clip_paths"])
                 except Exception as e:
                     raise ValueError(f"加载分镜 [{asset['panel_title']}] 的视频失败: {e}") from e
                 logger.info(
                     "已加载分镜 [%s]: duration=%.2f, size=%dx%d, audio=%s",
-                    asset["panel_title"], scene_video.duration,
-                    scene_video.w, scene_video.h,
-                    "有" if scene_video.audio is not None else "无",
+                    asset["panel_title"], panel_video.duration,
+                    panel_video.w, panel_video.h,
+                    "有" if panel_video.audio is not None else "无",
                 )
-                scene_videos.append(scene_video)
+                panel_videos.append(panel_video)
 
             # 构建顺序时间线片段列表（chain 模式按序播放，不需要手动设定 start）
             timeline_clips: list[VideoFileClip | CompositeVideoClip | ColorClip] = []
-            ref_w = int(scene_videos[0].w)
-            ref_h = int(scene_videos[0].h)
+            ref_w = int(panel_videos[0].w)
+            ref_h = int(panel_videos[0].h)
 
-            for idx, scene_video in enumerate(scene_videos):
-                timeline_clips.append(scene_video)
+            for idx, panel_video in enumerate(panel_videos):
+                timeline_clips.append(panel_video)
 
                 # fade_black 转场：在相邻场景之间插入黑场片段
-                if idx < len(scene_videos) - 1:
+                if idx < len(panel_videos) - 1:
                     asset = panel_assets[idx]
                     transition = resolve_transition(asset["transition_hint"], options.transition_type)
 
@@ -248,10 +248,10 @@ class VideoEditorService:
                             continue
 
                         start_time = max(0.0, float(segment.get("start", 0.0)))
-                        scene_duration = max(0.1, float(segment.get("duration", 0.1)))
+                        panel_duration = max(0.1, float(segment.get("duration", 0.1)))
                         raw_audio_clip = AudioFileClip(tts_audio_map[panel_id])
-                        if raw_audio_clip.duration > scene_duration:
-                            audio_clip = raw_audio_clip.subclipped(0, scene_duration)
+                        if raw_audio_clip.duration > panel_duration:
+                            audio_clip = raw_audio_clip.subclipped(0, panel_duration)
                             # subclipped 返回的子片段通过闭包引用原始 clip 的 reader，
                             # 不能关闭原始 clip，否则 reader=None 导致 NoneType get_frame。
                             # 放入 keepalive 列表，在 finally 中统一关闭。

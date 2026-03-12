@@ -97,9 +97,29 @@ def validate_runtime_business_rules(updates: Mapping[str, object]) -> None:
     if "video_provider" in updates and not str(updates["video_provider"]).strip():
         raise RuntimeSettingsValidationError("video_provider 不能为空")
 
+    # LLM：严格校验 base_url，不做自动补全/兼容修复。
+    provider = str(_effective_value(updates, "llm_provider") or "openai").strip().lower()
+    base_url = str(_effective_value(updates, "llm_base_url") or "").strip()
+    if base_url:
+        if not (base_url.startswith("http://") or base_url.startswith("https://")):
+            raise RuntimeSettingsValidationError("llm_base_url 必须以 http:// 或 https:// 开头")
+        if base_url.endswith("/"):
+            raise RuntimeSettingsValidationError("llm_base_url 不能以 / 结尾")
+        if provider == "openai" and not base_url.endswith("/v1"):
+            raise RuntimeSettingsValidationError("llm_provider=openai 时 llm_base_url 必须以 /v1 结尾")
+        if provider == "anthropic" and (base_url.endswith("/v1") or "/v1/" in base_url):
+            raise RuntimeSettingsValidationError("llm_provider=anthropic 时 llm_base_url 不应包含 /v1")
+
     if _effective_value(updates, "video_provider") == "ggk":
-        if not str(_effective_value(updates, "ggk_base_url") or "").strip():
+        ggk_base_url = str(_effective_value(updates, "ggk_base_url") or "").strip()
+        if not ggk_base_url:
             raise RuntimeSettingsValidationError("video_provider=ggk 时必须配置 GGK_BASE_URL")
+        if not (ggk_base_url.startswith("http://") or ggk_base_url.startswith("https://")):
+            raise RuntimeSettingsValidationError("GGK_BASE_URL 必须以 http:// 或 https:// 开头")
+        if ggk_base_url.endswith("/"):
+            raise RuntimeSettingsValidationError("GGK_BASE_URL 不能以 / 结尾，请填写 .../v1")
+        if not ggk_base_url.endswith("/v1"):
+            raise RuntimeSettingsValidationError("GGK_BASE_URL 必须以 /v1 结尾，例如 https://glk.jia4u.de/v1")
         if not str(_effective_value(updates, "ggk_api_key") or "").strip():
             raise RuntimeSettingsValidationError("video_provider=ggk 时必须配置 GGK_API_KEY")
 
@@ -110,6 +130,16 @@ def validate_runtime_business_rules(updates: Mapping[str, object]) -> None:
             parse_model_duration_profiles(str(updates["ggk_video_model_duration_profiles"] or ""))
         except ValueError as exc:
             raise RuntimeSettingsValidationError(f"ggk_video_model_duration_profiles 配置非法: {exc}") from exc
+
+    if "portrait_api_base_url" in updates:
+        portrait_base_url = str(updates["portrait_api_base_url"] or "").strip()
+        if portrait_base_url:
+            if not (portrait_base_url.startswith("http://") or portrait_base_url.startswith("https://")):
+                raise RuntimeSettingsValidationError("PORTRAIT_API_BASE_URL 必须以 http:// 或 https:// 开头")
+            if portrait_base_url.endswith("/"):
+                raise RuntimeSettingsValidationError("PORTRAIT_API_BASE_URL 不能以 / 结尾，请填写 .../v1")
+            if not portrait_base_url.endswith("/v1"):
+                raise RuntimeSettingsValidationError("PORTRAIT_API_BASE_URL 必须以 /v1 结尾，例如 https://glk.jia4u.de/v1")
 
     if "default_model_bindings" in updates:
         _validate_json_object_field(updates["default_model_bindings"], field_name="default_model_bindings")

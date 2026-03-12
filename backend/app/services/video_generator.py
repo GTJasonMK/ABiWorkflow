@@ -9,30 +9,35 @@ from pathlib import Path
 
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
 
 from app.clip_status import CLIP_STATUS_COMPLETED, CLIP_STATUS_FAILED
 from app.config import resolve_runtime_path, settings
-from app.models import Scene, SceneCharacter, VideoClip
+from app.models import Panel, VideoClip
+from app.panel_status import (
+    PANEL_REGENERATABLE_STATUSES,
+    PANEL_STATUS_COMPLETED,
+    PANEL_STATUS_FAILED,
+    PANEL_STATUS_PROCESSING,
+)
 from app.progress_payload import (
     PROGRESS_KEY_MESSAGE,
     PROGRESS_KEY_PANEL_ORDER,
     PROGRESS_KEY_PERCENT,
 )
-from app.scene_status import (
-    REGENERATABLE_SCENE_STATUSES,
-    SCENE_STATUS_FAILED,
-    SCENE_STATUS_GENERATED,
-    SCENE_STATUS_GENERATING,
+from app.services.panel_generation import (
+    list_project_panels_ordered,
+    resolve_panel_generation_request,
+    reset_panel_generation_state,
 )
 from app.services.progress import publish_progress
+from app.services.script_asset_compiler import get_panel_effective_binding
 from app.video_providers.base import VideoGenerateRequest, VideoProvider
 
 logger = logging.getLogger(__name__)
 
 
 class VideoGeneratorService:
-    """视频生成服务：管理批量生成、时长拆分"""
+    """视频生成服务：管理批量生成、时长拆分。"""
 
     def __init__(
         self,
@@ -49,10 +54,8 @@ class VideoGeneratorService:
 
     @staticmethod
     def _split_durations(total_duration: float, max_duration: float) -> list[float]:
-        """按 provider 最大时长拆分，返回每段时长列表。"""
         total_duration = max(0.1, total_duration)
         max_duration = max(0.1, max_duration)
-
         if total_duration <= max_duration:
             return [total_duration]
 
@@ -61,70 +64,75 @@ class VideoGeneratorService:
         return [clip_duration] * clip_count
 
     @staticmethod
-    def _pick_reference_image(scene: Scene) -> str | None:
-        """优先使用分镜映射场景关联角色中的参考图，提升跨分镜一致性。"""
-        for scene_character in scene.characters:
-            character = scene_character.character
-            if character and character.reference_image_url:
-                return character.reference_image_url
-        # Panel->Scene 桥接场景会复用 setting 传递参考图 URL。
-        setting = (scene.setting or "").strip()
-        if setting.startswith("http://") or setting.startswith("https://"):
-            return setting
-        return None
-
-    @staticmethod
-    def _seed_for(scene: Scene, clip_order: int, candidate_index: int = 0) -> int:
-        """为分镜映射片段生成稳定随机种子，降低多次生成结果漂移。"""
-        raw = f"{scene.project_id}:{scene.id}:{clip_order}:{candidate_index}"
+    def _seed_for(panel: Panel, clip_order: int, candidate_index: int = 0) -> int:
+        raw = f"{panel.project_id}:{panel.id}:{clip_order}:{candidate_index}"
         digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()
         return int(digest[:8], 16)
 
     @staticmethod
     def _build_request(
-        scene: Scene,
+        panel: Panel,
+        *,
+        prompt: str,
+        negative_prompt: str | None,
+        reference_image_url: str | None,
         duration: float,
         clip_order: int,
-        reference_image_url: str | None,
-        *,
         candidate_index: int = 0,
     ) -> VideoGenerateRequest:
         return VideoGenerateRequest(
-            prompt=scene.video_prompt or "",
+            prompt=prompt,
             duration_seconds=duration,
-            negative_prompt=scene.negative_prompt,
+            negative_prompt=negative_prompt,
             reference_image_url=reference_image_url,
-            seed=VideoGeneratorService._seed_for(scene, clip_order, candidate_index),
+            seed=VideoGeneratorService._seed_for(panel, clip_order, candidate_index),
         )
 
     def _build_clip_requests(
         self,
-        scene: Scene,
-        reference_image_url: str | None,
+        panel: Panel,
         *,
+        prompt: str,
+        negative_prompt: str | None,
+        reference_image_url: str | None,
         candidate_index: int = 0,
     ) -> list[tuple[int, VideoGenerateRequest]]:
-        durations = self._split_durations(scene.duration_seconds, self._provider.max_duration_seconds)
+        durations = self._split_durations(panel.duration_seconds, self._provider.max_duration_seconds)
         return [
             (
                 clip_order,
                 self._build_request(
-                    scene,
-                    duration,
-                    clip_order,
-                    reference_image_url,
+                    panel,
+                    prompt=prompt,
+                    negative_prompt=negative_prompt,
+                    reference_image_url=reference_image_url,
+                    duration=duration,
+                    clip_order=clip_order,
                     candidate_index=candidate_index,
                 ),
             )
             for clip_order, duration in enumerate(durations)
         ]
 
-    def split_by_duration(self, scene: Scene, reference_image_url: str | None = None) -> list[VideoGenerateRequest]:
-        """将超长分镜映射拆分为多个子请求。"""
-        return [request for _, request in self._build_clip_requests(scene, reference_image_url)]
+    def split_by_duration(
+        self,
+        panel: Panel,
+        *,
+        prompt: str,
+        negative_prompt: str | None,
+        reference_image_url: str | None,
+    ) -> list[VideoGenerateRequest]:
+        return [
+            request
+            for _, request in self._build_clip_requests(
+                panel,
+                prompt=prompt,
+                negative_prompt=negative_prompt,
+                reference_image_url=reference_image_url,
+            )
+        ]
 
     async def _wait_for_completion(self, task_id: str):
-        """轮询任务直到完成/失败/超时。"""
         start = time.monotonic()
         while True:
             status = await self._provider.poll_status(task_id)
@@ -137,33 +145,46 @@ class VideoGeneratorService:
 
             await asyncio.sleep(self._poll_interval_seconds)
 
-    async def _load_scene_with_relations(self, scene_id: str, db: AsyncSession) -> Scene:
-        stmt = (
-            select(Scene)
-            .where(Scene.id == scene_id)
-            .options(selectinload(Scene.characters).selectinload(SceneCharacter.character))
+    async def _load_panel_generation_context(
+        self,
+        panel_id: str,
+        db: AsyncSession,
+    ) -> tuple[Panel, dict[str, str | None]]:
+        panel = (await db.execute(select(Panel).where(Panel.id == panel_id))).scalar_one()
+        effective_binding = await get_panel_effective_binding(panel.id, db, auto_compile=True)
+        resolved = resolve_panel_generation_request(panel, effective_binding)
+        prompt = str(resolved.get("prompt") or "").strip()
+        if not prompt:
+            raise ValueError(f"分镜 {panel.title} 缺少视频提示词，无法生成")
+        return panel, resolved
+
+    @staticmethod
+    def _apply_panel_generation_status(panel: Panel, clips: list[VideoClip]) -> None:
+        panel.status = (
+            PANEL_STATUS_COMPLETED
+            if clips and all(item.status == CLIP_STATUS_COMPLETED for item in clips)
+            else PANEL_STATUS_FAILED
         )
-        return (await db.execute(stmt)).scalar_one()
 
     def _build_output_path(
         self,
-        scene: Scene,
+        panel: Panel,
         clip_order: int,
         task_id: str,
         *,
         candidate_index: int | None = None,
     ) -> Path:
-        project_dir = self._output_dir / scene.project_id
+        project_dir = self._output_dir / panel.project_id
         project_dir.mkdir(parents=True, exist_ok=True)
         if candidate_index is None:
-            filename = f"{scene.id}_{clip_order}_{task_id}.mp4"
+            filename = f"{panel.id}_{clip_order}_{task_id}.mp4"
         else:
-            filename = f"{scene.id}_{clip_order}_c{candidate_index}_{task_id}.mp4"
+            filename = f"{panel.id}_{clip_order}_c{candidate_index}_{task_id}.mp4"
         return project_dir / filename
 
     @staticmethod
     def _build_clip_record(
-        scene: Scene,
+        panel: Panel,
         request: VideoGenerateRequest,
         *,
         clip_order: int,
@@ -175,7 +196,7 @@ class VideoGeneratorService:
         error_message: str | None = None,
     ) -> VideoClip:
         return VideoClip(
-            scene_id=scene.id,
+            panel_id=panel.id,
             clip_order=clip_order,
             candidate_index=candidate_index or 0,
             is_selected=is_selected,
@@ -188,7 +209,7 @@ class VideoGeneratorService:
 
     async def _generate_clip(
         self,
-        scene: Scene,
+        panel: Panel,
         request: VideoGenerateRequest,
         *,
         clip_order: int,
@@ -198,17 +219,16 @@ class VideoGeneratorService:
         try:
             task_id = await self._provider.generate(request)
             status = await self._wait_for_completion(task_id)
-
             if status.status.lower() == CLIP_STATUS_COMPLETED:
                 output_path = self._build_output_path(
-                    scene,
+                    panel,
                     clip_order,
                     task_id,
                     candidate_index=candidate_index,
                 )
                 local_file = await self._provider.download(task_id, output_path)
                 return self._build_clip_record(
-                    scene,
+                    panel,
                     request,
                     clip_order=clip_order,
                     candidate_index=candidate_index,
@@ -219,7 +239,7 @@ class VideoGeneratorService:
                 )
 
             return self._build_clip_record(
-                scene,
+                panel,
                 request,
                 clip_order=clip_order,
                 candidate_index=candidate_index,
@@ -230,14 +250,14 @@ class VideoGeneratorService:
             )
         except Exception as err:
             logger.error(
-                "分镜映射 %s 候选 %s 片段 %d 生成失败: %s",
-                scene.id,
+                "分镜 %s 候选 %s 片段 %d 生成失败: %s",
+                panel.id,
                 candidate_index if candidate_index is not None else "default",
                 clip_order,
                 err,
             )
             return self._build_clip_record(
-                scene,
+                panel,
                 request,
                 clip_order=clip_order,
                 candidate_index=candidate_index,
@@ -248,7 +268,7 @@ class VideoGeneratorService:
 
     async def _generate_request_batch(
         self,
-        scene: Scene,
+        panel: Panel,
         db: AsyncSession,
         clip_requests: list[tuple[int, VideoGenerateRequest]],
         *,
@@ -258,7 +278,7 @@ class VideoGeneratorService:
         clips: list[VideoClip] = []
         for clip_order, request in clip_requests:
             clip = await self._generate_clip(
-                scene,
+                panel,
                 request,
                 clip_order=clip_order,
                 candidate_index=candidate_index,
@@ -268,57 +288,56 @@ class VideoGeneratorService:
             clips.append(clip)
         return clips
 
-    async def generate_scene(self, scene: Scene, db: AsyncSession) -> list[VideoClip]:
-        """为单个分镜映射生成视频（重试时会先清理旧片段）。"""
-        scene_with_relations = await self._load_scene_with_relations(scene.id, db)
+    async def generate_panel(self, panel: Panel, db: AsyncSession) -> list[VideoClip]:
+        panel_with_context, request_fields = await self._load_panel_generation_context(panel.id, db)
 
-        # 重试前清理旧片段，避免重复拼接
-        await db.execute(delete(VideoClip).where(VideoClip.scene_id == scene_with_relations.id))
-        scene_with_relations.status = SCENE_STATUS_GENERATING
+        await db.execute(delete(VideoClip).where(VideoClip.panel_id == panel_with_context.id))
+        reset_panel_generation_state(panel_with_context, clear_lipsync=True)
+        panel_with_context.status = PANEL_STATUS_PROCESSING
         await db.flush()
 
-        reference_image_url = self._pick_reference_image(scene_with_relations)
         clips = await self._generate_request_batch(
-            scene_with_relations,
+            panel_with_context,
             db,
-            self._build_clip_requests(scene_with_relations, reference_image_url),
+            self._build_clip_requests(
+                panel_with_context,
+                prompt=str(request_fields["prompt"]),
+                negative_prompt=request_fields["negative_prompt"],
+                reference_image_url=request_fields["reference_image_url"],
+            ),
         )
 
-        all_completed = all(c.status == CLIP_STATUS_COMPLETED for c in clips)
-        scene_with_relations.status = SCENE_STATUS_GENERATED if all_completed else SCENE_STATUS_FAILED
+        self._apply_panel_generation_status(panel_with_context, clips)
         await db.flush()
-
         return clips
 
     async def generate_candidates(
         self,
-        scene: Scene,
+        panel: Panel,
         candidate_count: int,
         db: AsyncSession,
     ) -> list[VideoClip]:
-        """为分镜映射生成多个候选视频（不清理旧片段，追加新候选）。"""
-        scene_with_relations = await self._load_scene_with_relations(scene.id, db)
-
+        panel_with_context, request_fields = await self._load_panel_generation_context(panel.id, db)
         existing_clips = (await db.execute(
-            select(VideoClip).where(VideoClip.scene_id == scene_with_relations.id)
+            select(VideoClip).where(VideoClip.panel_id == panel_with_context.id)
         )).scalars().all()
         has_existing = len(existing_clips) > 0
-        max_candidate = max((c.candidate_index for c in existing_clips), default=-1)
+        max_candidate = max((item.candidate_index for item in existing_clips), default=-1)
 
-        reference_image_url = self._pick_reference_image(scene_with_relations)
         all_new_clips: list[VideoClip] = []
-
         for candidate_offset in range(candidate_count):
             candidate_idx = max_candidate + 1 + candidate_offset
-            auto_select = (not has_existing) and (candidate_offset == 0)
+            auto_select = (not has_existing) and candidate_offset == 0
             clip_requests = self._build_clip_requests(
-                scene_with_relations,
-                reference_image_url,
+                panel_with_context,
+                prompt=str(request_fields["prompt"]),
+                negative_prompt=request_fields["negative_prompt"],
+                reference_image_url=request_fields["reference_image_url"],
                 candidate_index=candidate_idx,
             )
             all_new_clips.extend(
                 await self._generate_request_batch(
-                    scene_with_relations,
+                    panel_with_context,
                     db,
                     clip_requests,
                     candidate_index=candidate_idx,
@@ -334,20 +353,13 @@ class VideoGeneratorService:
         project_id: str,
         db: AsyncSession,
         *,
-        scene_ids: set[str] | None = None,
+        panel_ids: set[str] | None = None,
     ) -> None:
-        """批量生成项目所有分镜映射的视频。"""
-        stmt = (
-            select(Scene)
-            # 兼容异常中断后遗留的 generating 状态，允许后续重跑恢复。
-            .where(Scene.project_id == project_id, Scene.status.in_(list(REGENERATABLE_SCENE_STATUSES)))
-            .options(selectinload(Scene.characters).selectinload(SceneCharacter.character))
-            .order_by(Scene.sequence_order)
-        )
-        if scene_ids:
-            stmt = stmt.where(Scene.id.in_(list(scene_ids)))
-        scenes = (await db.execute(stmt)).scalars().all()
-        total = len(scenes)
+        panels = await list_project_panels_ordered(project_id, db)
+        if panel_ids is not None:
+            panels = [panel for panel in panels if panel.id in panel_ids]
+        panels = [panel for panel in panels if panel.status in PANEL_REGENERATABLE_STATUSES]
+        total = len(panels)
 
         if total == 0:
             publish_progress(project_id, "generate_complete", {
@@ -356,14 +368,13 @@ class VideoGeneratorService:
             })
             return
 
-        for idx, scene in enumerate(scenes):
+        for idx, panel in enumerate(panels):
             publish_progress(project_id, "generate_progress", {
-                PROGRESS_KEY_MESSAGE: f"正在生成分镜 {idx + 1}/{total}: {scene.title}",
+                PROGRESS_KEY_MESSAGE: f"正在生成分镜 {idx + 1}/{total}: {panel.title}",
                 PROGRESS_KEY_PERCENT: round((idx / total) * 100),
                 PROGRESS_KEY_PANEL_ORDER: idx + 1,
             })
-
-            await self.generate_scene(scene, db)
+            await self.generate_panel(panel, db)
 
         await db.commit()
         publish_progress(project_id, "generate_complete", {

@@ -85,7 +85,7 @@ export default function ProjectList() {
       setCreateModalOpen(false)
       form.resetFields()
       message.success('项目创建成功')
-      navigate(`/projects/${project.id}/script`)
+      navigate(`/projects/${project.id}`)
     } catch (error) {
       const maybeValidation = error as { errorFields?: unknown[] }
       if (Array.isArray(maybeValidation?.errorFields) && maybeValidation.errorFields.length > 0) {
@@ -128,7 +128,7 @@ export default function ProjectList() {
       ellipsis: true,
       width: 200,
       render: (name: string, record) => (
-        <button type="button" className="np-project-link" onClick={() => navigate(`/projects/${record.id}/script`)}>
+        <button type="button" className="np-project-link" onClick={() => navigate(`/projects/${record.id}`)}>
           {name}
         </button>
       ),
@@ -183,7 +183,7 @@ export default function ProjectList() {
             size="small"
             type="primary"
             icon={<RightOutlined />}
-            onClick={() => navigate(`/projects/${record.id}/script`)}
+            onClick={() => navigate(`/projects/${record.id}`)}
           >
             继续
           </Button>

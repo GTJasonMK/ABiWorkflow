@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.project_common import count_project_relations, count_project_storyboard, get_project_or_404, to_project_response
+from app.api.project_common import get_project_aggregate_counts, get_project_or_404, to_project_response
 from app.api.projects_workflow import workflow_router
 from app.config import resolve_runtime_path, settings
 from app.database import get_db
@@ -18,8 +18,26 @@ from app.project_status import (
     PROJECT_STATUS_DRAFT,
 )
 from app.schemas.common import ApiResponse, PaginatedResponse
-from app.schemas.project import ProjectCreate, ProjectListItem, ProjectResponse, ProjectUpdate
+from app.schemas.project import (
+    ProjectCreate,
+    ProjectListItem,
+    ProjectResponse,
+    ProjectScriptWorkspaceUpdate,
+    ProjectUpdate,
+    ProjectWorkspaceResponse,
+)
 from app.services.composition_state import mark_completed_compositions_stale
+from app.services.project_script_workspace import (
+    PANEL_EXISTS_BLOCK_DETAIL,
+    ProjectScriptWorkspaceConflictError,
+    sync_project_script_workspace,
+)
+from app.services.project_workflow_defaults import (
+    apply_project_workflow_defaults,
+    read_project_workflow_defaults,
+    resolve_project_workflow_defaults,
+)
+from app.services.project_workspace import build_project_workspace
 
 router = APIRouter(prefix="/projects", tags=["项目管理"])
 logger = logging.getLogger(__name__)
@@ -40,6 +58,11 @@ async def create_project(body: ProjectCreate, db: AsyncSession = Depends(get_db)
         raise HTTPException(status_code=400, detail="项目名称不能为空")
 
     project = Project(name=normalized_name, description=body.description)
+    workflow_defaults = await resolve_project_workflow_defaults(
+        db,
+        body.workflow_defaults.model_dump(exclude_unset=True) if body.workflow_defaults else None,
+    )
+    apply_project_workflow_defaults(project, workflow_defaults)
     db.add(project)
     await db.commit()
     await db.refresh(project)
@@ -153,18 +176,55 @@ async def list_projects(
     ))
 
 
+@router.get("/{project_id}/workspace", response_model=ApiResponse[ProjectWorkspaceResponse])
+async def get_project_workspace(project_id: str, db: AsyncSession = Depends(get_db)):
+    """获取项目工作台聚合数据。"""
+    project = await get_project_or_404(project_id, db)
+    return ApiResponse(data=await build_project_workspace(project, db))
+
+
+@router.put("/{project_id}/script-workspace", response_model=ApiResponse[ProjectWorkspaceResponse])
+async def update_project_script_workspace(
+    project_id: str,
+    body: ProjectScriptWorkspaceUpdate,
+    db: AsyncSession = Depends(get_db),
+):
+    project = await get_project_or_404(project_id, db)
+    if project.status in PROJECT_BUSY_STATUSES:
+        raise HTTPException(status_code=409, detail=f"项目状态 {project.status} 下不允许更新剧本分集工作台")
+
+    try:
+        await sync_project_script_workspace(
+            db,
+            project=project,
+            raw_script_text=body.script_text,
+            raw_workflow_defaults=body.workflow_defaults.model_dump(),
+            raw_episodes=[item.model_dump() for item in body.episodes],
+        )
+        await db.commit()
+    except ProjectScriptWorkspaceConflictError as exc:
+        await db.rollback()
+        detail = str(exc).strip() or PANEL_EXISTS_BLOCK_DETAIL
+        raise HTTPException(status_code=409, detail=detail) from exc
+    except ValueError as exc:
+        await db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    await db.refresh(project)
+    return ApiResponse(data=await build_project_workspace(project, db))
+
+
 @router.get("/{project_id}", response_model=ApiResponse[ProjectResponse])
 async def get_project(project_id: str, db: AsyncSession = Depends(get_db)):
     """获取项目详情"""
     project = await get_project_or_404(project_id, db)
-    _, character_count = await count_project_relations(project.id, db)
-    episode_count, panel_count, generated_panel_count = await count_project_storyboard(project.id, db)
+    counts = await get_project_aggregate_counts(project.id, db)
     return ApiResponse(data=to_project_response(
         project,
-        character_count=character_count,
-        episode_count=episode_count,
-        panel_count=panel_count,
-        generated_panel_count=generated_panel_count,
+        character_count=counts.character_count,
+        episode_count=counts.episode_count,
+        panel_count=counts.panel_count,
+        generated_panel_count=counts.generated_panel_count,
     ))
 
 
@@ -183,6 +243,16 @@ async def update_project(project_id: str, body: ProjectUpdate, db: AsyncSession 
             raise HTTPException(status_code=400, detail="项目名称不能为空")
         update_data["name"] = normalized_name
 
+    if "workflow_defaults" in update_data:
+        raw_workflow_defaults = update_data.pop("workflow_defaults")
+        workflow_defaults = await resolve_project_workflow_defaults(
+            db,
+            raw_workflow_defaults,
+            base_defaults=read_project_workflow_defaults(project),
+            clear_when_none=True,
+        )
+        apply_project_workflow_defaults(project, workflow_defaults)
+
     script_text_changed = "script_text" in update_data and update_data["script_text"] != project.script_text
     for key, value in update_data.items():
         setattr(project, key, value)
@@ -195,14 +265,13 @@ async def update_project(project_id: str, body: ProjectUpdate, db: AsyncSession 
 
     await db.commit()
     await db.refresh(project)
-    _, character_count = await count_project_relations(project.id, db)
-    episode_count, panel_count, generated_panel_count = await count_project_storyboard(project.id, db)
+    counts = await get_project_aggregate_counts(project.id, db)
     return ApiResponse(data=to_project_response(
         project,
-        character_count=character_count,
-        episode_count=episode_count,
-        panel_count=panel_count,
-        generated_panel_count=generated_panel_count,
+        character_count=counts.character_count,
+        episode_count=counts.episode_count,
+        panel_count=counts.panel_count,
+        generated_panel_count=counts.generated_panel_count,
     ))
 
 

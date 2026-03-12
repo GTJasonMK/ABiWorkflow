@@ -5,7 +5,43 @@ from httpx import AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import Episode, Panel, Scene
+from app.models import (
+    Character,
+    CompositionTask,
+    Episode,
+    GlobalVoice,
+    Panel,
+    Project,
+    ProviderConfig,
+    ScriptEntity,
+    ScriptEntityAssetBinding,
+    VideoClip,
+)
+
+
+async def _seed_provider_configs(db_session: AsyncSession) -> None:
+    db_session.add_all([
+        ProviderConfig(
+            provider_key="mock-video",
+            provider_type="video",
+            name="Mock Video",
+            base_url="https://video.example.test",
+            request_template_json='{"_allowed_video_lengths":[6,10,15]}',
+        ),
+        ProviderConfig(
+            provider_key="mock-tts",
+            provider_type="tts",
+            name="Mock TTS",
+            base_url="https://tts.example.test",
+        ),
+        ProviderConfig(
+            provider_key="mock-lipsync",
+            provider_type="lipsync",
+            name="Mock Lipsync",
+            base_url="https://lipsync.example.test",
+        ),
+    ])
+    await db_session.commit()
 
 
 @pytest.mark.asyncio
@@ -26,6 +62,16 @@ async def test_create_project(client: AsyncClient):
     assert data["success"] is True
     assert data["data"]["name"] == "测试项目"
     assert data["data"]["status"] == "draft"
+    assert data["data"]["workflow_defaults"] == {
+        "video_provider_key": None,
+        "tts_provider_key": None,
+        "lipsync_provider_key": None,
+        "provider_payload_defaults": {
+            "video": {},
+            "tts": {},
+            "lipsync": {},
+        },
+    }
 
 
 @pytest.mark.asyncio
@@ -135,18 +181,9 @@ async def test_project_counts_should_not_fallback_to_scene_data(
     client: AsyncClient,
     db_session: AsyncSession,
 ):
-    """项目统计只使用 Panel，不再回退 Scene。"""
+    """项目统计只使用 Panel，不再回退历史中间模型。"""
     create_resp = await client.post("/api/projects", json={"name": "仅场景项目"})
     project_id = create_resp.json()["data"]["id"]
-
-    db_session.add(Scene(
-        project_id=project_id,
-        sequence_order=0,
-        title="历史场景",
-        video_prompt="legacy prompt",
-        duration_seconds=5.0,
-        status="generated",
-    ))
     await db_session.commit()
 
     list_resp = await client.get("/api/projects")
@@ -283,6 +320,103 @@ async def test_update_project(client: AsyncClient):
 
 
 @pytest.mark.asyncio
+async def test_update_project_should_persist_workflow_defaults(
+    client: AsyncClient,
+    db_session: AsyncSession,
+):
+    await _seed_provider_configs(db_session)
+    create_resp = await client.post("/api/projects", json={"name": "带默认配置的项目"})
+    project_id = create_resp.json()["data"]["id"]
+
+    response = await client.put(
+        f"/api/projects/{project_id}",
+        json={
+            "workflow_defaults": {
+                "video_provider_key": "mock-video",
+                "tts_provider_key": "mock-tts",
+                "lipsync_provider_key": "mock-lipsync",
+                "provider_payload_defaults": {
+                    "video": {"seed": 7},
+                    "tts": {"format": "mp3"},
+                    "lipsync": {"fps": 25},
+                },
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    defaults = response.json()["data"]["workflow_defaults"]
+    assert defaults["video_provider_key"] == "mock-video"
+    assert defaults["tts_provider_key"] == "mock-tts"
+    assert defaults["lipsync_provider_key"] == "mock-lipsync"
+    assert defaults["provider_payload_defaults"] == {
+        "video": {"seed": 7},
+        "tts": {"format": "mp3"},
+        "lipsync": {"fps": 25},
+    }
+
+
+@pytest.mark.asyncio
+async def test_update_project_should_merge_and_clear_workflow_defaults(
+    client: AsyncClient,
+    db_session: AsyncSession,
+):
+    await _seed_provider_configs(db_session)
+    create_resp = await client.post("/api/projects", json={
+        "name": "默认配置合并项目",
+        "workflow_defaults": {
+            "video_provider_key": "mock-video",
+            "tts_provider_key": "mock-tts",
+            "lipsync_provider_key": "mock-lipsync",
+            "provider_payload_defaults": {
+                "video": {"seed": 11},
+                "tts": {"format": "mp3"},
+                "lipsync": {"fps": 24},
+            },
+        },
+    })
+    project_id = create_resp.json()["data"]["id"]
+
+    merge_resp = await client.put(
+        f"/api/projects/{project_id}",
+        json={
+            "workflow_defaults": {
+                "provider_payload_defaults": {
+                    "tts": {"format": "wav"},
+                },
+            },
+        },
+    )
+    assert merge_resp.status_code == 200
+    merged_defaults = merge_resp.json()["data"]["workflow_defaults"]
+    assert merged_defaults["video_provider_key"] == "mock-video"
+    assert merged_defaults["tts_provider_key"] == "mock-tts"
+    assert merged_defaults["lipsync_provider_key"] == "mock-lipsync"
+    assert merged_defaults["provider_payload_defaults"] == {
+        "video": {"seed": 11},
+        "tts": {"format": "wav"},
+        "lipsync": {"fps": 24},
+    }
+
+    clear_resp = await client.put(
+        f"/api/projects/{project_id}",
+        json={"workflow_defaults": None},
+    )
+    assert clear_resp.status_code == 200
+    cleared_defaults = clear_resp.json()["data"]["workflow_defaults"]
+    assert cleared_defaults == {
+        "video_provider_key": None,
+        "tts_provider_key": None,
+        "lipsync_provider_key": None,
+        "provider_payload_defaults": {
+            "video": {},
+            "tts": {},
+            "lipsync": {},
+        },
+    }
+
+
+@pytest.mark.asyncio
 async def test_delete_project(client: AsyncClient):
     """删除项目"""
     create_resp = await client.post("/api/projects", json={"name": "待删除"})
@@ -301,3 +435,359 @@ async def test_get_nonexistent_project(client: AsyncClient):
     """查询不存在的项目"""
     response = await client.get("/api/projects/nonexistent-id")
     assert response.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_duplicate_project_should_copy_character_structure(
+    client: AsyncClient,
+    db_session: AsyncSession,
+):
+    create_resp = await client.post("/api/projects", json={"name": "角色复制项目", "description": "角色结构描述"})
+    source_id = create_resp.json()["data"]["id"]
+
+    db_session.add_all([
+        Character(
+            project_id=source_id,
+            name="角色A",
+            appearance="短发，黑色风衣",
+            personality="冷静果断",
+            costume="黑色风衣",
+        ),
+        Character(
+            project_id=source_id,
+            name="角色B",
+            appearance="白色长裙",
+            personality="敏锐机警",
+            costume="白色长裙",
+        ),
+    ])
+    await db_session.commit()
+
+    dup_resp = await client.post(f"/api/projects/{source_id}/duplicate")
+    assert dup_resp.status_code == 200
+    dup_id = dup_resp.json()["data"]["id"]
+    assert dup_resp.json()["data"]["character_count"] == 2
+
+    dup_characters = (await db_session.execute(
+        select(Character).where(Character.project_id == dup_id).order_by(Character.name)
+    )).scalars().all()
+    assert [item.name for item in dup_characters] == ["角色A", "角色B"]
+    assert [item.appearance for item in dup_characters] == ["短发，黑色风衣", "白色长裙"]
+    assert [item.personality for item in dup_characters] == ["冷静果断", "敏锐机警"]
+
+
+@pytest.mark.asyncio
+async def test_duplicate_project_should_copy_workflow_defaults(
+    client: AsyncClient,
+    db_session: AsyncSession,
+):
+    await _seed_provider_configs(db_session)
+
+    create_resp = await client.post("/api/projects", json={
+        "name": "默认配置复制源",
+        "workflow_defaults": {
+            "video_provider_key": "mock-video",
+            "tts_provider_key": "mock-tts",
+            "lipsync_provider_key": "mock-lipsync",
+            "provider_payload_defaults": {
+                "video": {"seed": 99},
+                "tts": {"format": "wav"},
+                "lipsync": {"fps": 30},
+            },
+        },
+    })
+    source_id = create_resp.json()["data"]["id"]
+
+    dup_resp = await client.post(f"/api/projects/{source_id}/duplicate")
+
+    assert dup_resp.status_code == 200
+    defaults = dup_resp.json()["data"]["workflow_defaults"]
+    assert defaults["video_provider_key"] == "mock-video"
+    assert defaults["tts_provider_key"] == "mock-tts"
+    assert defaults["lipsync_provider_key"] == "mock-lipsync"
+    assert defaults["provider_payload_defaults"] == {
+        "video": {"seed": 99},
+        "tts": {"format": "wav"},
+        "lipsync": {"fps": 30},
+    }
+
+
+@pytest.mark.asyncio
+async def test_get_project_workspace_should_return_aggregated_summary(
+    client: AsyncClient,
+    db_session: AsyncSession,
+):
+    create_resp = await client.post("/api/projects", json={"name": "工作台聚合项目"})
+    project_id = create_resp.json()["data"]["id"]
+
+    episode = Episode(
+        project_id=project_id,
+        episode_order=0,
+        title="第1集",
+        summary="第一集摘要",
+        script_text="第一集正文",
+        video_provider_key="mock-video",
+    )
+    character_entity = ScriptEntity(project_id=project_id, entity_type="character", name="主角")
+    location_entity = ScriptEntity(project_id=project_id, entity_type="location", name="办公室")
+    db_session.add_all([episode, character_entity, location_entity])
+    await db_session.flush()
+
+    panel = Panel(
+        project_id=project_id,
+        episode_id=episode.id,
+        panel_order=0,
+        title="分镜一",
+        script_text="镜头内容",
+        status="completed",
+        video_url="/media/panel-1.mp4",
+    )
+    db_session.add(panel)
+    await db_session.flush()
+
+    db_session.add_all([
+        ScriptEntityAssetBinding(
+            project_id=project_id,
+            entity_id=character_entity.id,
+            asset_type="character",
+            asset_id="character-asset-1",
+            asset_name="主角立绘",
+            is_primary=True,
+        ),
+        GlobalVoice(
+            project_id=project_id,
+            name="项目旁白",
+            provider="mock-tts",
+            voice_code="voice-001",
+        ),
+        VideoClip(
+            panel_id=panel.id,
+            clip_order=0,
+            candidate_index=0,
+            status="completed",
+            is_selected=True,
+        ),
+        VideoClip(
+            panel_id=panel.id,
+            clip_order=0,
+            candidate_index=1,
+            status="failed",
+            is_selected=False,
+        ),
+        CompositionTask(
+            project_id=project_id,
+            episode_id=episode.id,
+            status="completed",
+            duration_seconds=12.5,
+        ),
+    ])
+    await db_session.commit()
+
+    response = await client.get(f"/api/projects/{project_id}/workspace")
+
+    assert response.status_code == 200
+    payload = response.json()["data"]
+    assert payload["project"]["id"] == project_id
+    assert payload["project"]["workflow_defaults"]["video_provider_key"] is None
+    assert payload["recommended_step"] == "assets"
+    assert payload["recommended_episode_id"] == episode.id
+    assert len(payload["episodes"]) == 1
+    assert payload["episodes"][0]["id"] == episode.id
+    assert payload["episodes"][0]["panel_count"] == 1
+    assert payload["episodes"][0]["script_text"] == "第一集正文"
+    assert payload["episodes"][0]["provider_payload_defaults"] == {
+        "video": {},
+        "tts": {},
+        "lipsync": {},
+    }
+    assert payload["episodes"][0]["skipped_checks"] == []
+    assert payload["resource_summary"] == {
+        "character_entity_count": 1,
+        "bound_character_entity_count": 1,
+        "location_entity_count": 1,
+        "bound_location_entity_count": 0,
+        "voice_asset_count": 1,
+        "panel_count": 1,
+        "clip_count": 2,
+        "ready_clip_count": 1,
+        "failed_clip_count": 1,
+        "composition_count": 1,
+    }
+    assert payload["latest_preview"]["duration_seconds"] == 12.5
+
+
+@pytest.mark.asyncio
+async def test_update_project_script_workspace_should_sync_project_and_episodes(
+    client: AsyncClient,
+    db_session: AsyncSession,
+):
+    await _seed_provider_configs(db_session)
+
+    create_resp = await client.post("/api/projects", json={"name": "剧本分集工作台保存项目"})
+    project_id = create_resp.json()["data"]["id"]
+
+    existing_episode = Episode(
+        project_id=project_id,
+        episode_order=0,
+        title="旧第1集",
+        summary="旧摘要",
+        script_text="旧正文",
+        video_provider_key="mock-video",
+    )
+    stale_episode = Episode(
+        project_id=project_id,
+        episode_order=1,
+        title="待删除分集",
+        summary="待删除摘要",
+        script_text="待删除正文",
+    )
+    db_session.add_all([existing_episode, stale_episode])
+    await db_session.commit()
+    existing_episode_id = existing_episode.id
+    stale_episode_id = stale_episode.id
+
+    response = await client.put(
+        f"/api/projects/{project_id}/script-workspace",
+        json={
+            "script_text": "第1集 新标题\n第一集新正文\n\n第2集 第二标题\n第二集正文",
+            "workflow_defaults": {
+                "video_provider_key": "mock-video",
+                "tts_provider_key": "mock-tts",
+                "lipsync_provider_key": "mock-lipsync",
+                "provider_payload_defaults": {
+                    "video": {"seed": 7},
+                    "tts": {"voice": "host"},
+                    "lipsync": {"fps": 24},
+                },
+            },
+            "episodes": [
+                {
+                    "id": existing_episode.id,
+                    "title": "新第1集",
+                    "summary": "第一集新摘要",
+                    "script_text": "第一集新正文",
+                    "video_provider_key": "mock-video",
+                    "tts_provider_key": "mock-tts",
+                    "lipsync_provider_key": None,
+                    "provider_payload_defaults": {
+                        "video": {"seed": 42},
+                        "tts": {"voice": "lead"},
+                    },
+                    "skipped_checks": ["voice_ready", "voice_ready", "video_ready"],
+                },
+                {
+                    "title": "新第2集",
+                    "summary": "第二集新摘要",
+                    "script_text": "第二集正文",
+                    "video_provider_key": None,
+                    "tts_provider_key": "mock-tts",
+                    "lipsync_provider_key": "mock-lipsync",
+                    "provider_payload_defaults": {
+                        "lipsync": {"fps": 30},
+                    },
+                    "skipped_checks": ["asset_binding_ready"],
+                },
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()["data"]
+    assert payload["project"]["workflow_defaults"] == {
+        "video_provider_key": "mock-video",
+        "tts_provider_key": "mock-tts",
+        "lipsync_provider_key": "mock-lipsync",
+        "provider_payload_defaults": {
+            "video": {"seed": 7},
+            "tts": {"voice": "host"},
+            "lipsync": {"fps": 24},
+        },
+    }
+    assert [item["title"] for item in payload["episodes"]] == ["新第1集", "新第2集"]
+    assert payload["episodes"][0]["id"] == existing_episode_id
+    assert payload["episodes"][0]["provider_payload_defaults"] == {
+        "video": {"seed": 42},
+        "tts": {"voice": "lead"},
+        "lipsync": {},
+    }
+    assert payload["episodes"][0]["skipped_checks"] == ["voice_ready", "video_ready"]
+    assert payload["episodes"][1]["provider_payload_defaults"] == {
+        "video": {},
+        "tts": {},
+        "lipsync": {"fps": 30},
+    }
+
+    db_session.expire_all()
+    refreshed_project = (await db_session.execute(select(Project).where(Project.id == project_id))).scalar_one()
+    assert refreshed_project.script_text == "第1集 新标题\n第一集新正文\n\n第2集 第二标题\n第二集正文"
+    episode_rows = (await db_session.execute(
+        select(Episode).where(Episode.project_id == project_id).order_by(Episode.episode_order)
+    )).scalars().all()
+    assert len(episode_rows) == 2
+    assert [item.title for item in episode_rows] == ["新第1集", "新第2集"]
+    assert stale_episode_id not in {item.id for item in episode_rows}
+
+
+@pytest.mark.asyncio
+async def test_update_project_script_workspace_should_reject_when_panels_exist(
+    client: AsyncClient,
+    db_session: AsyncSession,
+):
+    create_resp = await client.post("/api/projects", json={"name": "已有分镜阻断项目"})
+    project_id = create_resp.json()["data"]["id"]
+
+    episode = Episode(project_id=project_id, episode_order=0, title="第1集", script_text="旧正文")
+    db_session.add(episode)
+    await db_session.flush()
+    episode_id = episode.id
+    db_session.add(Panel(
+        project_id=project_id,
+        episode_id=episode_id,
+        panel_order=0,
+        title="已存在分镜",
+        script_text="镜头内容",
+    ))
+    await db_session.commit()
+
+    response = await client.put(
+        f"/api/projects/{project_id}/script-workspace",
+        json={
+            "script_text": "第1集 新正文",
+            "workflow_defaults": {
+                "video_provider_key": None,
+                "tts_provider_key": None,
+                "lipsync_provider_key": None,
+                "provider_payload_defaults": {
+                    "video": {},
+                    "tts": {},
+                    "lipsync": {},
+                },
+            },
+            "episodes": [
+                {
+                    "id": episode_id,
+                    "title": "第1集",
+                    "summary": None,
+                    "script_text": "新正文",
+                    "video_provider_key": None,
+                    "tts_provider_key": None,
+                    "lipsync_provider_key": None,
+                    "provider_payload_defaults": {
+                        "video": {},
+                        "tts": {},
+                        "lipsync": {},
+                    },
+                    "skipped_checks": [],
+                },
+            ],
+        },
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "当前项目已存在分镜，禁止从剧本分集页覆盖分集结构"
+
+    db_session.expire_all()
+    refreshed_project = (await db_session.execute(select(Project).where(Project.id == project_id))).scalar_one()
+    refreshed_episode = (await db_session.execute(select(Episode).where(Episode.id == episode_id))).scalar_one()
+    assert refreshed_project.script_text is None
+    assert refreshed_episode.script_text == "旧正文"

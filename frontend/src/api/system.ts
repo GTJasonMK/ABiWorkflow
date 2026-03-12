@@ -13,6 +13,7 @@ export interface RuntimeSummaryPayload {
     database_url: string
   }
   llm: {
+    provider: string
     model: string
     base_url: string | null
     api_key_configured: boolean
@@ -23,10 +24,8 @@ export interface RuntimeSummaryPayload {
     celery_broker_url: string
     celery_result_backend: string
     celery_worker_online: boolean
-    queue_mode: 'redis' | 'sqlite'
+    queue_mode: 'redis'
     redis_available: boolean
-    fallback_active: boolean
-    fallback_reason: string | null
   }
   video: {
     provider: string
@@ -79,6 +78,7 @@ export interface RuntimeSettingsUpdatePayload {
   debug?: boolean
   database_url?: string
   llm_api_key?: string
+  llm_provider?: string
   llm_model?: string
   llm_base_url?: string
   ggk_base_url?: string

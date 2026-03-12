@@ -12,6 +12,10 @@ interface UseTaskRecordsOptions {
   limit?: number
   includeDismissed?: boolean
   pollIntervalMs?: number | null
+  projectId?: string
+  episodeId?: string
+  panelId?: string
+  status?: string
   onError?: (error: unknown) => void
 }
 
@@ -20,6 +24,10 @@ export default function useTaskRecords({
   limit = 200,
   includeDismissed = false,
   pollIntervalMs = null,
+  projectId,
+  episodeId,
+  panelId,
+  status,
   onError,
 }: UseTaskRecordsOptions = {}) {
   const [tasks, setTasks] = useState<TaskRecord[]>([])
@@ -34,7 +42,14 @@ export default function useTaskRecords({
     const showLoading = options?.showLoading ?? true
     if (showLoading) setLoading(true)
     try {
-      const rows = await listTaskRecords({ limit, include_dismissed: includeDismissed })
+      const rows = await listTaskRecords({
+        project_id: projectId,
+        episode_id: episodeId,
+        panel_id: panelId,
+        status,
+        limit,
+        include_dismissed: includeDismissed,
+      })
       setTasks(rows)
     } catch (error) {
       if (!options?.silent) {
@@ -43,7 +58,7 @@ export default function useTaskRecords({
     } finally {
       if (showLoading) setLoading(false)
     }
-  }, [includeDismissed, limit])
+  }, [episodeId, includeDismissed, limit, panelId, projectId, status])
 
   useEffect(() => {
     if (!enabled) return

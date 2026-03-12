@@ -12,7 +12,7 @@ from app.tasks.status_recovery import (
 
 @celery_app.task(bind=True, name="split_episodes_llm")
 def split_episodes_llm_task(self, project_id: str, content: str):
-    """异步执行 AI 分集（失败自动回退到规则切分）。"""
+    """异步执行 AI 分集。"""
     from app.config import reload_settings
 
     reload_settings()

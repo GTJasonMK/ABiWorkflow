@@ -5,8 +5,20 @@ from httpx import AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import Character, CompositionTask, Panel, Project, Scene, SceneCharacter, VideoClip
-from tests.test_api._workflow_test_utils import build_episode, build_panel, seed_panels_from_scenes
+from app.models import Character, CompositionTask, Panel, Project, VideoClip
+from tests.test_api._workflow_test_utils import build_episode, build_panel
+
+
+def build_completed_clip(panel: Panel, *, clip_order: int = 0) -> VideoClip:
+    return VideoClip(
+        panel_id=panel.id,
+        clip_order=clip_order,
+        candidate_index=0,
+        is_selected=True,
+        file_path=f"./outputs/videos/{panel.id}_{clip_order}.mp4",
+        status="completed",
+        duration_seconds=panel.duration_seconds,
+    )
 
 
 @pytest.mark.asyncio
@@ -52,7 +64,7 @@ async def test_parse_should_reject_when_project_is_generating(
 
 
 @pytest.mark.asyncio
-async def test_parse_should_allow_force_recover_when_project_is_stuck_parsing(
+async def test_parse_sync_should_restore_previous_status_when_parse_failed(
     client: AsyncClient,
     db_session: AsyncSession,
     monkeypatch: pytest.MonkeyPatch,
@@ -61,16 +73,8 @@ async def test_parse_should_allow_force_recover_when_project_is_stuck_parsing(
         async def close(self) -> None:
             return None
 
-    class _FakeResult:
-        character_count = 0
-        panel_count = 0
-        episode_count = 0
-
     async def fake_parse_project_from_episodes(project_id: str, script_text: str, llm, db: AsyncSession):  # noqa: ANN001
-        project = (await db.execute(select(Project).where(Project.id == project_id))).scalar_one()
-        project.status = "parsed"
-        await db.flush()
-        return _FakeResult()
+        raise RuntimeError("sync parse failed")
 
     monkeypatch.setattr("app.llm.factory.create_llm_adapter", lambda: _FakeLLM())
     monkeypatch.setattr(
@@ -78,17 +82,13 @@ async def test_parse_should_allow_force_recover_when_project_is_stuck_parsing(
         fake_parse_project_from_episodes,
     )
 
-    project = Project(name="解析强制恢复测试", status="parsing", script_text="测试剧本")
+    project = Project(name="解析同步失败回滚测试", status="parsed", script_text="测试剧本")
     db_session.add(project)
     await db_session.commit()
 
-    response = await client.post(
-        f"/api/projects/{project.id}/parse",
-        params={"force_recover": "true"},
-    )
-    assert response.status_code == 200
-    assert response.json()["data"]["panel_count"] == 0
-    assert response.json()["data"]["character_count"] == 0
+    response = await client.post(f"/api/projects/{project.id}/parse")
+    assert response.status_code == 500
+    assert "剧本解析失败" in response.json()["detail"]
 
     await db_session.refresh(project)
     assert project.status == "parsed"
@@ -103,17 +103,17 @@ async def test_generate_should_reject_when_project_is_generating(
     db_session.add(project)
     await db_session.flush()
 
-    scene = Scene(
-        project_id=project.id,
-        sequence_order=0,
-        title="场景一",
-        video_prompt="A cinematic opening shot",
+    episode = build_episode(project.id)
+    db_session.add(episode)
+    await db_session.flush()
+    db_session.add(build_panel(
+        project.id,
+        episode.id,
+        title="分镜一",
+        visual_prompt="A cinematic opening shot",
         duration_seconds=5.0,
         status="pending",
-    )
-    db_session.add(scene)
-    await db_session.flush()
-    await seed_panels_from_scenes(db_session, project.id, [scene])
+    ))
     await db_session.commit()
 
     response = await client.post(f"/api/projects/{project.id}/generate")
@@ -122,7 +122,7 @@ async def test_generate_should_reject_when_project_is_generating(
 
 
 @pytest.mark.asyncio
-async def test_generate_should_reject_when_project_is_draft_even_if_scenes_ready(
+async def test_generate_should_recover_draft_project_when_all_panels_are_already_ready(
     client: AsyncClient,
     db_session: AsyncSession,
 ):
@@ -130,79 +130,48 @@ async def test_generate_should_reject_when_project_is_draft_even_if_scenes_ready
     db_session.add(project)
     await db_session.flush()
 
-    scene = Scene(
-        project_id=project.id,
-        sequence_order=0,
-        title="历史已生成场景",
-        video_prompt="A cinematic shot",
-        duration_seconds=5.0,
-        status="generated",
-    )
-    db_session.add(scene)
+    episode = build_episode(project.id)
+    db_session.add(episode)
     await db_session.flush()
-    await seed_panels_from_scenes(db_session, project.id, [scene])
+    panel = build_panel(
+        project.id,
+        episode.id,
+        title="历史已完成分镜",
+        visual_prompt="A cinematic shot",
+        duration_seconds=5.0,
+        status="completed",
+    )
+    db_session.add(panel)
+    await db_session.flush()
+    db_session.add(build_completed_clip(panel))
     await db_session.commit()
 
     response = await client.post(f"/api/projects/{project.id}/generate")
-    assert response.status_code == 409
-    assert "不允许启动生成" in response.json()["detail"]
-
-
-@pytest.mark.asyncio
-async def test_generate_should_allow_force_recover_when_project_is_stuck_generating(
-    client: AsyncClient,
-    db_session: AsyncSession,
-    monkeypatch: pytest.MonkeyPatch,
-):
-    async def fake_generate_all(self, project_id: str, db: AsyncSession, *, scene_ids=None):  # noqa: ANN001
-        scenes = (await db.execute(select(Scene).where(Scene.project_id == project_id))).scalars().all()
-        for scene in scenes:
-            if scene.status in {"pending", "failed", "generating"}:
-                scene.status = "generated"
-        await db.flush()
-
-    monkeypatch.setattr("app.api.generation.VideoGeneratorService.generate_all", fake_generate_all)
-
-    project = Project(name="生成强制恢复测试", status="generating")
-    db_session.add(project)
-    await db_session.flush()
-
-    scene = Scene(
-        project_id=project.id,
-        sequence_order=0,
-        title="待生成场景",
-        video_prompt="A cinematic shot",
-        duration_seconds=5.0,
-        status="pending",
-    )
-    db_session.add(scene)
-    await db_session.flush()
-    await seed_panels_from_scenes(db_session, project.id, [scene])
-    await db_session.commit()
-
-    response = await client.post(
-        f"/api/projects/{project.id}/generate",
-        params={"force_recover": "true"},
-    )
     assert response.status_code == 200
-    assert response.json()["data"]["completed"] == 1
-    assert response.json()["data"]["failed"] == 0
+    payload = response.json()["data"]
+    assert payload["total_panels"] == 1
+    assert payload["completed"] == 1
+    assert payload["failed"] == 0
 
     await db_session.refresh(project)
     assert project.status == "parsed"
 
 
 @pytest.mark.asyncio
-async def test_generate_should_only_validate_prompts_for_pending_or_failed_scenes(
+async def test_generate_should_only_validate_prompts_for_pending_or_failed_panels(
     client: AsyncClient,
     db_session: AsyncSession,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    async def fake_generate_all(self, project_id: str, db: AsyncSession, *, scene_ids=None):  # noqa: ANN001
-        scenes = (await db.execute(select(Scene).where(Scene.project_id == project_id))).scalars().all()
-        for scene in scenes:
-            if scene.status in {"pending", "failed"}:
-                scene.status = "generated"
+    async def fake_generate_all(self, project_id: str, db: AsyncSession, *, panel_ids=None):  # noqa: ANN001
+        stmt = select(Panel).where(Panel.project_id == project_id)
+        if panel_ids:
+            stmt = stmt.where(Panel.id.in_(list(panel_ids)))
+        panels = (await db.execute(stmt)).scalars().all()
+        for panel in panels:
+            if panel.status in {"pending", "failed", "processing", "draft"}:
+                panel.status = "completed"
+                db.add(build_completed_clip(panel))
         await db.flush()
 
     monkeypatch.setattr("app.api.generation.VideoGeneratorService.generate_all", fake_generate_all)
@@ -211,25 +180,31 @@ async def test_generate_should_only_validate_prompts_for_pending_or_failed_scene
     db_session.add(project)
     await db_session.flush()
 
-    generated_scene_without_prompt = Scene(
-        project_id=project.id,
-        sequence_order=0,
-        title="已完成但无提示词场景",
-        video_prompt="",
+    episode = build_episode(project.id)
+    db_session.add(episode)
+    await db_session.flush()
+
+    ready_panel_without_prompt = build_panel(
+        project.id,
+        episode.id,
+        order=0,
+        title="已完成但无提示词分镜",
+        visual_prompt=None,
         duration_seconds=5.0,
-        status="generated",
+        status="completed",
     )
-    pending_scene = Scene(
-        project_id=project.id,
-        sequence_order=1,
-        title="待生成场景",
-        video_prompt="A cinematic shot",
+    pending_panel = build_panel(
+        project.id,
+        episode.id,
+        order=1,
+        title="待生成分镜",
+        visual_prompt="A cinematic shot",
         duration_seconds=5.0,
         status="pending",
     )
-    db_session.add_all([generated_scene_without_prompt, pending_scene])
+    db_session.add_all([ready_panel_without_prompt, pending_panel])
     await db_session.flush()
-    await seed_panels_from_scenes(db_session, project.id, [generated_scene_without_prompt, pending_scene])
+    db_session.add(build_completed_clip(ready_panel_without_prompt))
     await db_session.commit()
 
     response = await client.post(f"/api/projects/{project.id}/generate")
@@ -241,31 +216,34 @@ async def test_generate_should_only_validate_prompts_for_pending_or_failed_scene
 
 
 @pytest.mark.asyncio
-async def test_generate_should_treat_completed_scene_status_as_ready(
+async def test_generate_should_treat_completed_panel_status_as_ready(
     client: AsyncClient,
     db_session: AsyncSession,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    async def fake_generate_all(self, project_id: str, db: AsyncSession, *, scene_ids=None):  # noqa: ANN001
+    async def fake_generate_all(self, project_id: str, db: AsyncSession, *, panel_ids=None):  # noqa: ANN001
         return None
 
     monkeypatch.setattr("app.api.generation.VideoGeneratorService.generate_all", fake_generate_all)
 
-    project = Project(name="历史状态兼容测试", status="parsed")
+    project = Project(name="已完成场景生成测试", status="parsed")
     db_session.add(project)
     await db_session.flush()
 
-    scene = Scene(
-        project_id=project.id,
-        sequence_order=0,
-        title="历史已完成场景",
-        video_prompt="legacy prompt",
+    episode = build_episode(project.id)
+    db_session.add(episode)
+    await db_session.flush()
+    panel = build_panel(
+        project.id,
+        episode.id,
+        title="已完成分镜",
+        visual_prompt="completed prompt",
         duration_seconds=5.0,
         status="completed",
     )
-    db_session.add(scene)
+    db_session.add(panel)
     await db_session.flush()
-    await seed_panels_from_scenes(db_session, project.id, [scene])
+    db_session.add(build_completed_clip(panel))
     await db_session.commit()
 
     response = await client.post(f"/api/projects/{project.id}/generate")
@@ -288,17 +266,17 @@ async def test_compose_should_reject_when_project_is_composing(
     db_session.add(project)
     await db_session.flush()
 
-    scene = Scene(
-        project_id=project.id,
-        sequence_order=0,
-        title="场景一",
-        video_prompt="A cinematic ending shot",
-        duration_seconds=5.0,
-        status="generated",
-    )
-    db_session.add(scene)
+    episode = build_episode(project.id)
+    db_session.add(episode)
     await db_session.flush()
-    await seed_panels_from_scenes(db_session, project.id, [scene])
+    db_session.add(build_panel(
+        project.id,
+        episode.id,
+        title="分镜一",
+        visual_prompt="A cinematic ending shot",
+        duration_seconds=5.0,
+        status="completed",
+    ))
     await db_session.commit()
 
     response = await client.post(
@@ -310,17 +288,17 @@ async def test_compose_should_reject_when_project_is_composing(
 
 
 @pytest.mark.asyncio
-async def test_compose_should_allow_force_recover_when_project_is_stuck_composing(
+async def test_compose_should_accept_completed_panel_status(
     client: AsyncClient,
     db_session: AsyncSession,
     monkeypatch: pytest.MonkeyPatch,
 ):
     async def fake_compose(self, project_id: str, options, db: AsyncSession, episode_id: str | None = None):  # noqa: ANN001
-        return "force-recover-compose-id"
+        return "completed-panel-comp-id"
 
     monkeypatch.setattr("app.api.composition.VideoEditorService.compose", fake_compose)
 
-    project = Project(name="合成强制恢复测试", status="composing")
+    project = Project(name="已完成场景状态合成测试", status="parsed")
     db_session.add(project)
     await db_session.flush()
 
@@ -331,95 +309,10 @@ async def test_compose_should_allow_force_recover_when_project_is_stuck_composin
         project.id,
         episode.id,
         title="已完成分镜",
-        visual_prompt="prompt",
+        visual_prompt="completed prompt",
         duration_seconds=5.0,
         status="completed",
-        video_url="/media/videos/ready.mp4",
     ))
-    await db_session.commit()
-
-    response = await client.post(
-        f"/api/projects/{project.id}/compose",
-        params={"force_recover": "true"},
-        json={"include_subtitles": False, "include_tts": False},
-    )
-    assert response.status_code == 200
-    assert response.json()["data"]["composition_id"] == "force-recover-compose-id"
-
-    await db_session.refresh(project)
-    assert project.status == "completed"
-
-
-@pytest.mark.asyncio
-async def test_compose_force_recover_should_not_restore_composing_when_async_submit_failed(
-    client: AsyncClient,
-    db_session: AsyncSession,
-    monkeypatch: pytest.MonkeyPatch,
-):
-    class _FailDispatcher:
-        def delay(self, *args, **kwargs):  # noqa: ANN002, ANN003
-            raise RuntimeError("queue down")
-
-    monkeypatch.setattr("app.tasks.health.has_celery_worker", lambda: True)
-    monkeypatch.setattr("app.api.task_mode.has_celery_worker", lambda: True)
-    monkeypatch.setattr("app.tasks.compose_tasks.compose_video_task", _FailDispatcher())
-
-    project = Project(name="合成恢复回滚测试", status="composing")
-    db_session.add(project)
-    await db_session.flush()
-
-    episode = build_episode(project.id)
-    db_session.add(episode)
-    await db_session.flush()
-    db_session.add(build_panel(
-        project.id,
-        episode.id,
-        title="已完成分镜",
-        visual_prompt="prompt",
-        duration_seconds=5.0,
-        status="completed",
-        video_url="/media/videos/ready.mp4",
-    ))
-    await db_session.commit()
-
-    response = await client.post(
-        f"/api/projects/{project.id}/compose",
-        params={"async_mode": "true", "force_recover": "true"},
-        json={"include_subtitles": False, "include_tts": False},
-    )
-    assert response.status_code == 500
-    assert "合成任务提交失败" in response.json()["detail"]
-
-    await db_session.refresh(project)
-    assert project.status == "parsed"
-
-
-@pytest.mark.asyncio
-async def test_compose_should_accept_completed_scene_status_for_legacy_data(
-    client: AsyncClient,
-    db_session: AsyncSession,
-    monkeypatch: pytest.MonkeyPatch,
-):
-    async def fake_compose(self, project_id: str, options, db: AsyncSession, episode_id: str | None = None):  # noqa: ANN001
-        return "legacy-comp-id"
-
-    monkeypatch.setattr("app.api.composition.VideoEditorService.compose", fake_compose)
-
-    project = Project(name="历史场景状态合成测试", status="parsed")
-    db_session.add(project)
-    await db_session.flush()
-
-    scene = Scene(
-        project_id=project.id,
-        sequence_order=0,
-        title="历史场景",
-        video_prompt="legacy prompt",
-        duration_seconds=5.0,
-        status="completed",
-    )
-    db_session.add(scene)
-    await db_session.flush()
-    await seed_panels_from_scenes(db_session, project.id, [scene])
     await db_session.commit()
 
     response = await client.post(
@@ -427,7 +320,7 @@ async def test_compose_should_accept_completed_scene_status_for_legacy_data(
         json={"include_subtitles": False, "include_tts": False},
     )
     assert response.status_code == 200
-    assert response.json()["data"]["composition_id"] == "legacy-comp-id"
+    assert response.json()["data"]["composition_id"] == "completed-panel-comp-id"
 
 
 @pytest.mark.asyncio
@@ -455,17 +348,17 @@ async def test_compose_should_mark_previous_compositions_stale(
     db_session.add(project)
     await db_session.flush()
 
-    scene = Scene(
-        project_id=project.id,
-        sequence_order=0,
-        title="场景一",
-        video_prompt="prompt",
-        duration_seconds=5.0,
-        status="generated",
-    )
-    db_session.add(scene)
+    episode = build_episode(project.id)
+    db_session.add(episode)
     await db_session.flush()
-    await seed_panels_from_scenes(db_session, project.id, [scene])
+    db_session.add(build_panel(
+        project.id,
+        episode.id,
+        title="分镜一",
+        visual_prompt="prompt",
+        duration_seconds=5.0,
+        status="completed",
+    ))
     previous_task = CompositionTask(
         project_id=project.id,
         output_path="./outputs/compositions/old.mp4",
@@ -526,6 +419,9 @@ async def test_update_panel_should_invalidate_outputs_when_generation_fields_cha
         status="completed",
         video_url="/media/videos/old.mp4",
     )
+    panel.video_provider_task_id = "video-task-stale-1"
+    panel.lipsync_provider_task_id = "lipsync-task-stale-1"
+    panel.tts_provider_task_id = "tts-task-keep-1"
     db_session.add(panel)
     composition = CompositionTask(
         project_id=project.id,
@@ -546,18 +442,28 @@ async def test_update_panel_should_invalidate_outputs_when_generation_fields_cha
     assert response.status_code == 200
     assert response.json()["data"]["status"] == "pending"
     assert response.json()["data"]["video_url"] is None
+    assert response.json()["data"]["video_provider_task_id"] is None
+    assert response.json()["data"]["lipsync_provider_task_id"] is None
+    assert response.json()["data"]["tts_provider_task_id"] == "tts-task-keep-1"
 
     _project_id = project.id
+    _panel_id = panel.id
     _composition_id = composition.id
     db_session.expire_all()
 
     updated_project = (await db_session.execute(
         select(Project).where(Project.id == _project_id)
     )).scalar_one()
+    updated_panel = (await db_session.execute(
+        select(Panel).where(Panel.id == _panel_id)
+    )).scalar_one()
     updated_composition = (await db_session.execute(
         select(CompositionTask).where(CompositionTask.id == _composition_id)
     )).scalar_one()
     assert updated_project.status == "parsed"
+    assert updated_panel.video_provider_task_id is None
+    assert updated_panel.lipsync_provider_task_id is None
+    assert updated_panel.tts_provider_task_id == "tts-task-keep-1"
     assert updated_composition.status == "stale"
 
 
@@ -633,6 +539,78 @@ async def test_update_panel_should_only_invalidate_same_episode_compositions(
 
 
 @pytest.mark.asyncio
+async def test_update_panel_should_invalidate_voice_outputs_when_voice_inputs_changed(
+    client: AsyncClient,
+    db_session: AsyncSession,
+):
+    project = Project(name="分镜语音输入失效测试", status="completed")
+    db_session.add(project)
+    await db_session.flush()
+
+    episode = build_episode(project.id)
+    db_session.add(episode)
+    await db_session.flush()
+
+    panel = build_panel(
+        project.id,
+        episode.id,
+        title="分镜语音失效",
+        visual_prompt="stable prompt",
+        status="completed",
+        video_url="/media/videos/stable.mp4",
+    )
+    panel.tts_text = "旧台词"
+    panel.tts_audio_url = "/media/audio/stale.mp3"
+    panel.tts_provider_task_id = "tts-task-stale-1"
+    panel.lipsync_video_url = "/media/videos/lipsync-stale.mp4"
+    panel.lipsync_provider_task_id = "lipsync-task-stale-1"
+    db_session.add(panel)
+    composition = CompositionTask(
+        project_id=project.id,
+        output_path="./outputs/compositions/stable.mp4",
+        duration_seconds=5.0,
+        status="completed",
+    )
+    db_session.add(composition)
+    await db_session.commit()
+
+    response = await client.put(
+        f"/api/panels/{panel.id}",
+        json={"tts_text": "新台词"},
+    )
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["status"] == "completed"
+    assert data["video_url"] == "/media/videos/stable.mp4"
+    assert data["tts_audio_url"] is None
+    assert data["tts_provider_task_id"] is None
+    assert data["lipsync_video_url"] is None
+    assert data["lipsync_provider_task_id"] is None
+
+    _project_id = project.id
+    _panel_id = panel.id
+    _composition_id = composition.id
+    db_session.expire_all()
+
+    updated_project = (await db_session.execute(
+        select(Project).where(Project.id == _project_id)
+    )).scalar_one()
+    updated_panel = (await db_session.execute(
+        select(Panel).where(Panel.id == _panel_id)
+    )).scalar_one()
+    updated_composition = (await db_session.execute(
+        select(CompositionTask).where(CompositionTask.id == _composition_id)
+    )).scalar_one()
+    assert updated_project.status == "parsed"
+    assert updated_panel.video_url == "/media/videos/stable.mp4"
+    assert updated_panel.tts_audio_url is None
+    assert updated_panel.tts_provider_task_id is None
+    assert updated_panel.lipsync_video_url is None
+    assert updated_panel.lipsync_provider_task_id is None
+    assert updated_composition.status == "stale"
+
+
+@pytest.mark.asyncio
 async def test_update_panel_should_not_invalidate_outputs_when_only_non_generation_fields_changed(
     client: AsyncClient,
     db_session: AsyncSession,
@@ -704,18 +682,20 @@ async def test_update_panel_should_reject_when_project_is_generating(
 
 
 @pytest.mark.asyncio
-async def test_retry_panel_should_keep_project_parsed_when_other_scenes_are_pending(
+async def test_retry_panel_should_keep_project_parsed_when_other_panels_are_pending(
     client: AsyncClient,
     db_session: AsyncSession,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    async def fake_generate_scene(self, scene: Scene, db: AsyncSession):  # noqa: ANN001
-        scene.status = "generated"
+    async def fake_generate_panel(self, panel: Panel, db: AsyncSession):  # noqa: ANN001
+        panel.status = "completed"
+        clip = build_completed_clip(panel)
+        db.add(clip)
         await db.flush()
-        return []
+        return [clip]
 
     monkeypatch.setattr("app.api.generation.get_provider", lambda: object())
-    monkeypatch.setattr("app.api.generation.VideoGeneratorService.generate_scene", fake_generate_scene)
+    monkeypatch.setattr("app.api.generation.VideoGeneratorService.generate_panel", fake_generate_panel)
 
     project = Project(name="单分镜重试状态测试", status="parsed")
     db_session.add(project)
@@ -742,24 +722,6 @@ async def test_retry_panel_should_keep_project_parsed_when_other_scenes_are_pend
         status="pending",
     )
     db_session.add_all([retry_panel, pending_panel])
-
-    retry_scene = Scene(
-        project_id=project.id,
-        sequence_order=0,
-        title="待重试分镜",
-        video_prompt="retry prompt",
-        duration_seconds=5.0,
-        status="failed",
-    )
-    pending_scene = Scene(
-        project_id=project.id,
-        sequence_order=1,
-        title="其他待生成分镜",
-        video_prompt="pending prompt",
-        duration_seconds=5.0,
-        status="pending",
-    )
-    db_session.add_all([retry_scene, pending_scene])
     await db_session.commit()
 
     response = await client.post(f"/api/panels/{retry_panel.id}/retry")
@@ -776,10 +738,10 @@ async def test_retry_panel_should_preserve_completed_project_when_retry_failed(
     db_session: AsyncSession,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    async def fake_generate_scene(self, scene: Scene, db: AsyncSession):  # noqa: ANN001
+    async def fake_generate_panel(self, panel: Panel, db: AsyncSession):  # noqa: ANN001
         raise RuntimeError("mock generation failure")
 
-    monkeypatch.setattr("app.api.generation.VideoGeneratorService.generate_scene", fake_generate_scene)
+    monkeypatch.setattr("app.api.generation.VideoGeneratorService.generate_panel", fake_generate_panel)
 
     project = Project(name="已完成项目重试失败测试", status="completed")
     db_session.add(project)
@@ -796,16 +758,6 @@ async def test_retry_panel_should_preserve_completed_project_when_retry_failed(
         status="failed",
     )
     db_session.add(panel)
-
-    scene = Scene(
-        project_id=project.id,
-        sequence_order=0,
-        title="失败分镜",
-        video_prompt="retry prompt",
-        duration_seconds=5.0,
-        status="failed",
-    )
-    db_session.add(scene)
     await db_session.commit()
 
     response = await client.post(f"/api/panels/{panel.id}/retry")
@@ -822,13 +774,15 @@ async def test_retry_panel_should_mark_previous_compositions_stale_on_success(
     db_session: AsyncSession,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    async def fake_generate_scene(self, scene: Scene, db: AsyncSession):  # noqa: ANN001
-        scene.status = "generated"
+    async def fake_generate_panel(self, panel: Panel, db: AsyncSession):  # noqa: ANN001
+        panel.status = "completed"
+        clip = build_completed_clip(panel)
+        db.add(clip)
         await db.flush()
-        return []
+        return [clip]
 
     monkeypatch.setattr("app.api.generation.get_provider", lambda: object())
-    monkeypatch.setattr("app.api.generation.VideoGeneratorService.generate_scene", fake_generate_scene)
+    monkeypatch.setattr("app.api.generation.VideoGeneratorService.generate_panel", fake_generate_panel)
 
     project = Project(name="重试成片失效测试", status="completed")
     db_session.add(project)
@@ -846,16 +800,6 @@ async def test_retry_panel_should_mark_previous_compositions_stale_on_success(
         video_url="/media/videos/current.mp4",
     )
     db_session.add(panel)
-
-    scene = Scene(
-        project_id=project.id,
-        sequence_order=0,
-        title="需重试分镜",
-        video_prompt="retry prompt",
-        duration_seconds=5.0,
-        status="generated",
-    )
-    db_session.add(scene)
     composition = CompositionTask(
         project_id=project.id,
         output_path="./outputs/compositions/current.mp4",
@@ -881,10 +825,10 @@ async def test_retry_panel_should_mark_previous_compositions_stale_when_retry_fa
     db_session: AsyncSession,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    async def fake_generate_scene(self, scene: Scene, db: AsyncSession):  # noqa: ANN001
+    async def fake_generate_panel(self, panel: Panel, db: AsyncSession):  # noqa: ANN001
         raise RuntimeError("mock generation failure")
 
-    monkeypatch.setattr("app.api.generation.VideoGeneratorService.generate_scene", fake_generate_scene)
+    monkeypatch.setattr("app.api.generation.VideoGeneratorService.generate_panel", fake_generate_panel)
 
     project = Project(name="重试失败成片失效测试", status="completed")
     db_session.add(project)
@@ -901,16 +845,6 @@ async def test_retry_panel_should_mark_previous_compositions_stale_when_retry_fa
         status="failed",
     )
     db_session.add(panel)
-
-    scene = Scene(
-        project_id=project.id,
-        sequence_order=0,
-        title="失败分镜",
-        video_prompt="retry prompt",
-        duration_seconds=5.0,
-        status="failed",
-    )
-    db_session.add(scene)
     composition = CompositionTask(
         project_id=project.id,
         output_path="./outputs/compositions/current.mp4",
@@ -931,19 +865,19 @@ async def test_retry_panel_should_mark_previous_compositions_stale_when_retry_fa
 
 
 @pytest.mark.asyncio
-async def test_retry_panel_should_keep_completed_scene_status_when_post_process_failed(
+async def test_retry_panel_should_keep_completed_panel_status_when_post_process_failed(
     client: AsyncClient,
     db_session: AsyncSession,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    async def fake_generate_scene(self, scene: Scene, db: AsyncSession):  # noqa: ANN001
-        scene.status = "completed"
+    async def fake_generate_panel(self, panel: Panel, db: AsyncSession):  # noqa: ANN001
+        panel.status = "completed"
         await db.flush()
         raise RuntimeError("post process failed")
 
-    monkeypatch.setattr("app.api.generation.VideoGeneratorService.generate_scene", fake_generate_scene)
+    monkeypatch.setattr("app.api.generation.VideoGeneratorService.generate_panel", fake_generate_panel)
 
-    project = Project(name="重试历史状态保护测试", status="parsed")
+    project = Project(name="重试完成状态保护测试", status="parsed")
     db_session.add(project)
     await db_session.flush()
 
@@ -958,28 +892,18 @@ async def test_retry_panel_should_keep_completed_scene_status_when_post_process_
         status="failed",
     )
     db_session.add(panel)
-
-    scene = Scene(
-        project_id=project.id,
-        sequence_order=0,
-        title="历史状态分镜",
-        video_prompt="retry prompt",
-        duration_seconds=5.0,
-        status="failed",
-    )
-    db_session.add(scene)
     await db_session.commit()
 
     response = await client.post(f"/api/panels/{panel.id}/retry")
     assert response.status_code == 500
     assert "分镜重试失败" in response.json()["detail"]
 
-    await db_session.refresh(scene)
-    assert scene.status == "completed"
+    await db_session.refresh(panel)
+    assert panel.status == "completed"
 
 
 @pytest.mark.asyncio
-async def test_retry_panel_should_mark_scene_failed_when_provider_init_failed(
+async def test_retry_panel_should_keep_failed_panel_status_when_provider_init_failed(
     client: AsyncClient,
     db_session: AsyncSession,
     monkeypatch: pytest.MonkeyPatch,
@@ -1004,28 +928,18 @@ async def test_retry_panel_should_mark_scene_failed_when_provider_init_failed(
         status="failed",
     )
     db_session.add(panel)
-
-    scene = Scene(
-        project_id=project.id,
-        sequence_order=0,
-        title="失败分镜",
-        video_prompt="retry prompt",
-        duration_seconds=5.0,
-        status="failed",
-    )
-    db_session.add(scene)
     await db_session.commit()
 
     response = await client.post(f"/api/panels/{panel.id}/retry")
     assert response.status_code == 500
     assert "分镜重试失败" in response.json()["detail"]
 
-    await db_session.refresh(scene)
-    assert scene.status == "failed"
+    await db_session.refresh(panel)
+    assert panel.status == "failed"
 
 
 @pytest.mark.asyncio
-async def test_retry_panel_should_restore_ready_scene_when_provider_init_failed(
+async def test_retry_panel_should_restore_ready_panel_when_provider_init_failed(
     client: AsyncClient,
     db_session: AsyncSession,
     monkeypatch: pytest.MonkeyPatch,
@@ -1051,16 +965,6 @@ async def test_retry_panel_should_restore_ready_scene_when_provider_init_failed(
         video_url="/media/videos/current.mp4",
     )
     db_session.add(panel)
-
-    scene = Scene(
-        project_id=project.id,
-        sequence_order=0,
-        title="已完成分镜",
-        video_prompt="retry prompt",
-        duration_seconds=5.0,
-        status="generated",
-    )
-    db_session.add(scene)
     composition = CompositionTask(
         project_id=project.id,
         output_path="./outputs/compositions/current.mp4",
@@ -1075,10 +979,10 @@ async def test_retry_panel_should_restore_ready_scene_when_provider_init_failed(
     assert "分镜重试失败" in response.json()["detail"]
 
     await db_session.refresh(project)
-    await db_session.refresh(scene)
+    await db_session.refresh(panel)
     await db_session.refresh(composition)
     assert project.status == "completed"
-    assert scene.status == "generated"
+    assert panel.status == "completed"
     assert composition.status == "completed"
 
 
@@ -1180,7 +1084,7 @@ async def test_reorder_panels_should_not_downgrade_when_order_unchanged(
 
 
 @pytest.mark.asyncio
-async def test_update_character_reference_image_should_invalidate_related_scene_generation(
+async def test_update_character_reference_image_should_invalidate_project_panel_generation(
     client: AsyncClient,
     db_session: AsyncSession,
 ):
@@ -1199,25 +1103,22 @@ async def test_update_character_reference_image_should_invalidate_related_scene_
     db_session.add(character)
     await db_session.flush()
 
-    scene = Scene(
-        project_id=project.id,
-        sequence_order=0,
-        title="场景一",
-        video_prompt="A cinematic portrait shot",
-        duration_seconds=5.0,
-        status="generated",
-    )
-    db_session.add(scene)
+    episode = build_episode(project.id)
+    db_session.add(episode)
     await db_session.flush()
 
-    db_session.add(SceneCharacter(scene_id=scene.id, character_id=character.id, action="看向镜头"))
-    db_session.add(VideoClip(
-        scene_id=scene.id,
-        clip_order=0,
-        file_path="./outputs/videos/scene_old.mp4",
-        status="completed",
+    panel = build_panel(
+        project.id,
+        episode.id,
+        title="分镜一",
+        visual_prompt="A cinematic portrait shot",
         duration_seconds=5.0,
-    ))
+        status="completed",
+    )
+    db_session.add(panel)
+    await db_session.flush()
+
+    db_session.add(build_completed_clip(panel))
     composition = CompositionTask(
         project_id=project.id,
         output_path="./outputs/compositions/old.mp4",
@@ -1235,18 +1136,18 @@ async def test_update_character_reference_image_should_invalidate_related_scene_
     assert response.json()["data"]["reference_image_url"] == "https://example.com/new.png"
 
     await db_session.refresh(project)
-    await db_session.refresh(scene)
+    await db_session.refresh(panel)
     await db_session.refresh(composition)
-    clips = (await db_session.execute(select(VideoClip).where(VideoClip.scene_id == scene.id))).scalars().all()
+    clips = (await db_session.execute(select(VideoClip).where(VideoClip.panel_id == panel.id))).scalars().all()
 
     assert project.status == "parsed"
-    assert scene.status == "pending"
+    assert panel.status == "pending"
     assert composition.status == "stale"
     assert clips == []
 
 
 @pytest.mark.asyncio
-async def test_update_unreferenced_character_should_not_invalidate_project_outputs(
+async def test_update_character_reference_image_should_invalidate_project_outputs_even_without_explicit_binding(
     client: AsyncClient,
     db_session: AsyncSession,
 ):
@@ -1262,23 +1163,21 @@ async def test_update_unreferenced_character_should_not_invalidate_project_outpu
     db_session.add(character)
     await db_session.flush()
 
-    scene = Scene(
-        project_id=project.id,
-        sequence_order=0,
-        title="场景一",
-        video_prompt="A cinematic shot",
-        duration_seconds=5.0,
-        status="generated",
-    )
-    db_session.add(scene)
+    episode = build_episode(project.id)
+    db_session.add(episode)
     await db_session.flush()
-    db_session.add(VideoClip(
-        scene_id=scene.id,
-        clip_order=0,
-        file_path="./outputs/videos/scene.mp4",
-        status="completed",
+
+    panel = build_panel(
+        project.id,
+        episode.id,
+        title="分镜一",
+        visual_prompt="A cinematic shot",
         duration_seconds=5.0,
-    ))
+        status="completed",
+    )
+    db_session.add(panel)
+    await db_session.flush()
+    db_session.add(build_completed_clip(panel))
 
     composition = CompositionTask(
         project_id=project.id,
@@ -1296,11 +1195,13 @@ async def test_update_unreferenced_character_should_not_invalidate_project_outpu
     assert response.status_code == 200
 
     await db_session.refresh(project)
-    await db_session.refresh(scene)
+    await db_session.refresh(panel)
     await db_session.refresh(composition)
-    assert project.status == "completed"
-    assert scene.status == "generated"
-    assert composition.status == "completed"
+    clips = (await db_session.execute(select(VideoClip).where(VideoClip.panel_id == panel.id))).scalars().all()
+    assert project.status == "parsed"
+    assert panel.status == "pending"
+    assert composition.status == "stale"
+    assert clips == []
 
 
 @pytest.mark.asyncio
@@ -1382,17 +1283,20 @@ async def test_generate_should_keep_completed_status_when_nothing_to_regenerate(
     db_session.add(project)
     await db_session.flush()
 
-    scene = Scene(
-        project_id=project.id,
-        sequence_order=0,
-        title="已生成场景",
-        video_prompt="prompt",
-        duration_seconds=5.0,
-        status="generated",
-    )
-    db_session.add(scene)
+    episode = build_episode(project.id)
+    db_session.add(episode)
     await db_session.flush()
-    await seed_panels_from_scenes(db_session, project.id, [scene])
+    panel = build_panel(
+        project.id,
+        episode.id,
+        title="已完成分镜",
+        visual_prompt="prompt",
+        duration_seconds=5.0,
+        status="completed",
+    )
+    db_session.add(panel)
+    await db_session.flush()
+    db_session.add(build_completed_clip(panel))
     await db_session.commit()
 
     response = await client.post(f"/api/projects/{project.id}/generate")
@@ -1405,7 +1309,7 @@ async def test_generate_should_keep_completed_status_when_nothing_to_regenerate(
 
 
 @pytest.mark.asyncio
-async def test_generate_should_recover_failed_project_when_all_scenes_already_ready(
+async def test_generate_should_recover_failed_project_when_all_panels_are_already_ready(
     client: AsyncClient,
     db_session: AsyncSession,
 ):
@@ -1413,17 +1317,20 @@ async def test_generate_should_recover_failed_project_when_all_scenes_already_re
     db_session.add(project)
     await db_session.flush()
 
-    scene = Scene(
-        project_id=project.id,
-        sequence_order=0,
-        title="已生成场景",
-        video_prompt="prompt",
-        duration_seconds=5.0,
-        status="generated",
-    )
-    db_session.add(scene)
+    episode = build_episode(project.id)
+    db_session.add(episode)
     await db_session.flush()
-    await seed_panels_from_scenes(db_session, project.id, [scene])
+    panel = build_panel(
+        project.id,
+        episode.id,
+        title="已完成分镜",
+        visual_prompt="prompt",
+        duration_seconds=5.0,
+        status="completed",
+    )
+    db_session.add(panel)
+    await db_session.flush()
+    db_session.add(build_completed_clip(panel))
     await db_session.commit()
 
     response = await client.post(f"/api/projects/{project.id}/generate")
@@ -1436,7 +1343,7 @@ async def test_generate_should_recover_failed_project_when_all_scenes_already_re
 
 
 @pytest.mark.asyncio
-async def test_generate_should_recover_generating_project_when_all_scenes_already_ready(
+async def test_generate_should_recover_generating_project_when_all_panels_are_already_ready(
     client: AsyncClient,
     db_session: AsyncSession,
 ):
@@ -1444,17 +1351,20 @@ async def test_generate_should_recover_generating_project_when_all_scenes_alread
     db_session.add(project)
     await db_session.flush()
 
-    scene = Scene(
-        project_id=project.id,
-        sequence_order=0,
-        title="已生成场景",
-        video_prompt="prompt",
-        duration_seconds=5.0,
-        status="generated",
-    )
-    db_session.add(scene)
+    episode = build_episode(project.id)
+    db_session.add(episode)
     await db_session.flush()
-    await seed_panels_from_scenes(db_session, project.id, [scene])
+    panel = build_panel(
+        project.id,
+        episode.id,
+        title="已完成分镜",
+        visual_prompt="prompt",
+        duration_seconds=5.0,
+        status="completed",
+    )
+    db_session.add(panel)
+    await db_session.flush()
+    db_session.add(build_completed_clip(panel))
     await db_session.commit()
 
     response = await client.post(f"/api/projects/{project.id}/generate")
@@ -1472,11 +1382,15 @@ async def test_generate_should_mark_previous_compositions_stale_when_regeneratin
     db_session: AsyncSession,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    async def fake_generate_all(self, project_id: str, db: AsyncSession, *, scene_ids=None):  # noqa: ANN001
-        target = (await db.execute(
-            select(Scene).where(Scene.project_id == project_id, Scene.status == "failed")
-        )).scalar_one()
-        target.status = "generated"
+    async def fake_generate_all(self, project_id: str, db: AsyncSession, *, panel_ids=None):  # noqa: ANN001
+        stmt = select(Panel).where(Panel.project_id == project_id)
+        if panel_ids:
+            stmt = stmt.where(Panel.id.in_(list(panel_ids)))
+        panels = (await db.execute(stmt)).scalars().all()
+        for panel in panels:
+            if panel.status in {"pending", "failed", "processing", "draft"}:
+                panel.status = "completed"
+                db.add(build_completed_clip(panel))
         await db.flush()
 
     monkeypatch.setattr("app.api.generation.VideoGeneratorService.generate_all", fake_generate_all)
@@ -1485,25 +1399,30 @@ async def test_generate_should_mark_previous_compositions_stale_when_regeneratin
     db_session.add(project)
     await db_session.flush()
 
-    ready_scene = Scene(
-        project_id=project.id,
-        sequence_order=0,
-        title="已完成场景",
-        video_prompt="prompt-ready",
+    episode = build_episode(project.id)
+    db_session.add(episode)
+    await db_session.flush()
+    ready_panel = build_panel(
+        project.id,
+        episode.id,
+        order=0,
+        title="已完成分镜",
+        visual_prompt="prompt-ready",
         duration_seconds=5.0,
-        status="generated",
+        status="completed",
     )
-    failed_scene = Scene(
-        project_id=project.id,
-        sequence_order=1,
-        title="失败场景",
-        video_prompt="prompt-failed",
+    failed_panel = build_panel(
+        project.id,
+        episode.id,
+        order=1,
+        title="失败分镜",
+        visual_prompt="prompt-failed",
         duration_seconds=5.0,
         status="failed",
     )
-    db_session.add_all([ready_scene, failed_scene])
+    db_session.add_all([ready_panel, failed_panel])
     await db_session.flush()
-    await seed_panels_from_scenes(db_session, project.id, [ready_scene, failed_scene])
+    db_session.add(build_completed_clip(ready_panel))
     previous_composition = CompositionTask(
         project_id=project.id,
         output_path="./outputs/compositions/old.mp4",
@@ -1530,7 +1449,7 @@ async def test_generate_should_mark_previous_compositions_stale_when_regeneratio
     db_session: AsyncSession,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    async def fake_generate_all(self, project_id: str, db: AsyncSession, *, scene_ids=None):  # noqa: ANN001
+    async def fake_generate_all(self, project_id: str, db: AsyncSession, *, panel_ids=None):  # noqa: ANN001
         raise RuntimeError("mock generation failure")
 
     monkeypatch.setattr("app.api.generation.VideoGeneratorService.generate_all", fake_generate_all)
@@ -1539,17 +1458,19 @@ async def test_generate_should_mark_previous_compositions_stale_when_regeneratio
     db_session.add(project)
     await db_session.flush()
 
-    failed_scene = Scene(
-        project_id=project.id,
-        sequence_order=0,
-        title="失败场景",
-        video_prompt="prompt-failed",
+    episode = build_episode(project.id)
+    db_session.add(episode)
+    await db_session.flush()
+    failed_panel = build_panel(
+        project.id,
+        episode.id,
+        title="失败分镜",
+        visual_prompt="prompt-failed",
         duration_seconds=5.0,
         status="failed",
     )
-    db_session.add(failed_scene)
+    db_session.add(failed_panel)
     await db_session.flush()
-    await seed_panels_from_scenes(db_session, project.id, [failed_scene])
     previous_composition = CompositionTask(
         project_id=project.id,
         output_path="./outputs/compositions/old.mp4",
@@ -1587,17 +1508,19 @@ async def test_generate_async_submit_failed_should_not_mark_previous_composition
     db_session.add(project)
     await db_session.flush()
 
-    failed_scene = Scene(
-        project_id=project.id,
-        sequence_order=0,
-        title="失败场景",
-        video_prompt="prompt-failed",
+    episode = build_episode(project.id)
+    db_session.add(episode)
+    await db_session.flush()
+    failed_panel = build_panel(
+        project.id,
+        episode.id,
+        title="失败分镜",
+        visual_prompt="prompt-failed",
         duration_seconds=5.0,
         status="failed",
     )
-    db_session.add(failed_scene)
+    db_session.add(failed_panel)
     await db_session.flush()
-    await seed_panels_from_scenes(db_session, project.id, [failed_scene])
     previous_composition = CompositionTask(
         project_id=project.id,
         output_path="./outputs/compositions/old.mp4",
@@ -1621,42 +1544,49 @@ async def test_generate_async_submit_failed_should_not_mark_previous_composition
 
 
 @pytest.mark.asyncio
-async def test_generate_should_recover_stale_generating_scenes_after_interruption(
+async def test_generate_should_recover_stale_processing_panels_after_interruption(
     client: AsyncClient,
     db_session: AsyncSession,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    async def fake_generate_scene(self, scene: Scene, db: AsyncSession):  # noqa: ANN001
-        scene.status = "generated"
+    async def fake_generate_panel(self, panel: Panel, db: AsyncSession):  # noqa: ANN001
+        panel.status = "completed"
+        clip = build_completed_clip(panel)
+        db.add(clip)
         await db.flush()
-        return []
+        return [clip]
 
     monkeypatch.setattr("app.api.generation.get_provider", lambda: object())
-    monkeypatch.setattr("app.services.video_generator.VideoGeneratorService.generate_scene", fake_generate_scene)
+    monkeypatch.setattr("app.services.video_generator.VideoGeneratorService.generate_panel", fake_generate_panel)
 
     project = Project(name="中断恢复测试", status="parsed")
     db_session.add(project)
     await db_session.flush()
 
-    stale_scene = Scene(
-        project_id=project.id,
-        sequence_order=0,
-        title="中断中的场景",
-        video_prompt="prompt-stale",
-        duration_seconds=5.0,
-        status="generating",
-    )
-    ready_scene = Scene(
-        project_id=project.id,
-        sequence_order=1,
-        title="已完成场景",
-        video_prompt="prompt-ready",
-        duration_seconds=5.0,
-        status="generated",
-    )
-    db_session.add_all([stale_scene, ready_scene])
+    episode = build_episode(project.id)
+    db_session.add(episode)
     await db_session.flush()
-    await seed_panels_from_scenes(db_session, project.id, [stale_scene, ready_scene])
+    stale_panel = build_panel(
+        project.id,
+        episode.id,
+        order=0,
+        title="中断中的分镜",
+        visual_prompt="prompt-stale",
+        duration_seconds=5.0,
+        status="processing",
+    )
+    ready_panel = build_panel(
+        project.id,
+        episode.id,
+        order=1,
+        title="已完成分镜",
+        visual_prompt="prompt-ready",
+        duration_seconds=5.0,
+        status="completed",
+    )
+    db_session.add_all([stale_panel, ready_panel])
+    await db_session.flush()
+    db_session.add(build_completed_clip(ready_panel))
     await db_session.commit()
 
     response = await client.post(f"/api/projects/{project.id}/generate")
@@ -1667,9 +1597,9 @@ async def test_generate_should_recover_stale_generating_scenes_after_interruptio
     assert payload["failed"] == 0
 
     await db_session.refresh(project)
-    await db_session.refresh(stale_scene)
+    await db_session.refresh(stale_panel)
     assert project.status == "parsed"
-    assert stale_scene.status == "generated"
+    assert stale_panel.status == "completed"
 
 
 @pytest.mark.asyncio

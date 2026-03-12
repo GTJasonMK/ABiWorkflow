@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   App as AntdApp,
+  Alert,
   Button,
   Card,
   Empty,
@@ -26,7 +27,11 @@ import {
 } from '../../api/scriptAssets'
 import type { ScriptAssetBinding, ScriptEntity, ScriptEntityType } from '../../types/scriptAssets'
 import type { AssetHubOverview } from '../../types/assetHub'
-import { bindingBelongsToEpisodeScope, normalizeBindingForEpisodeScope } from '../../utils/scriptAssetScope'
+import {
+  bindingBelongsToEpisodeScope,
+  bindingIsSharedDefault,
+  normalizeBindingForEpisodeScope,
+} from '../../utils/scriptAssetScope'
 
 const { Text } = Typography
 
@@ -34,6 +39,7 @@ interface ScriptAssetConsoleProps {
   projectId: string
   enabledTypes?: ScriptEntityType[]
   initialType?: ScriptEntityType
+  hideTypeTabs?: boolean
   refreshSignal?: number
   focusSignal?: number
   scopeEpisodeId?: string | null
@@ -54,10 +60,88 @@ function defaultEntityName(type: ScriptEntityType): string {
   return '新说话人实体'
 }
 
+interface CandidateOption {
+  label: string
+  value: string
+  asset_name: string
+}
+
+interface ScopedBindingsState {
+  scoped: ScriptAssetBinding[]
+  unscoped: ScriptAssetBinding[]
+}
+
+function mergeEntityIntoList(rows: ScriptEntity[], entity: ScriptEntity): ScriptEntity[] {
+  const idx = rows.findIndex((item) => item.id === entity.id)
+  if (idx < 0) return [...rows, entity]
+  const next = [...rows]
+  next[idx] = entity
+  return next
+}
+
+function getBindingAssetType(entityType: ScriptEntityType): ScriptAssetBinding['asset_type'] {
+  return entityType === 'speaker' ? 'voice' : entityType
+}
+
+function normalizeBindingRecord(binding: ScriptAssetBinding, priority: number): ScriptAssetBinding {
+  return {
+    asset_type: binding.asset_type,
+    asset_id: binding.asset_id,
+    asset_name: binding.asset_name ?? undefined,
+    role_tag: binding.role_tag ?? undefined,
+    priority,
+    is_primary: Boolean(binding.is_primary),
+    strategy: binding.strategy ?? {},
+  }
+}
+
+function normalizeBindingList(
+  bindings: ScriptAssetBinding[],
+  transform?: (binding: ScriptAssetBinding) => ScriptAssetBinding,
+): ScriptAssetBinding[] {
+  const normalized = bindings.map((binding, index) => normalizeBindingRecord(binding, index))
+  if (normalized.length > 0 && !normalized.some((item) => item.is_primary)) {
+    const firstBinding = normalized[0]
+    if (firstBinding) {
+      normalized[0] = { ...firstBinding, is_primary: true }
+    }
+  }
+  return normalized.map((binding, index) => {
+    const nextBinding = { ...binding, priority: index }
+    return transform ? transform(nextBinding) : nextBinding
+  })
+}
+
+function splitBindingsByScope(
+  bindings: ScriptAssetBinding[],
+  inScope: (binding: ScriptAssetBinding) => boolean,
+): ScopedBindingsState {
+  return bindings.reduce<ScopedBindingsState>((acc, binding) => {
+    if (inScope(binding)) {
+      acc.scoped.push(binding)
+    } else {
+      acc.unscoped.push(binding)
+    }
+    return acc
+  }, { scoped: [], unscoped: [] })
+}
+
+function buildCandidateOptions(overview: AssetHubOverview | null, entityType: ScriptEntityType): CandidateOption[] {
+  if (!overview) return []
+  if (entityType === 'character') {
+    return overview.characters.map((item) => ({ label: item.name, value: item.id, asset_name: item.name }))
+  }
+  if (entityType === 'location') {
+    return overview.locations.map((item) => ({ label: item.name, value: item.id, asset_name: item.name }))
+  }
+  return overview.voices.map((item) => ({ label: item.name, value: item.id, asset_name: item.name }))
+}
+
 export default function ScriptAssetConsole({
   projectId,
   enabledTypes,
   initialType,
+  hideTypeTabs = false,
   refreshSignal,
   focusSignal,
   scopeEpisodeId,
@@ -96,15 +180,20 @@ export default function ScriptAssetConsole({
   const availableTypeSet = useMemo(() => new Set<ScriptEntityType>(availableTypes), [availableTypes])
   const scopedMode = enforceEpisodeScope && Boolean(scopeEpisodeId)
 
-  const bindingBelongsToCurrentScope = (binding: ScriptAssetBinding): boolean => {
+  const bindingBelongsToCurrentScope = useCallback((binding: ScriptAssetBinding): boolean => {
     if (!scopedMode) return true
     return bindingBelongsToEpisodeScope(binding, scopeEpisodeId)
-  }
+  }, [scopedMode, scopeEpisodeId])
 
-  const normalizeBindingForScope = (binding: ScriptAssetBinding): ScriptAssetBinding => {
+  const normalizeBindingForScope = useCallback((binding: ScriptAssetBinding): ScriptAssetBinding => {
     if (!scopedMode) return binding
     return normalizeBindingForEpisodeScope(binding, scopeEpisodeId, 'asset_binding_page')
-  }
+  }, [scopedMode, scopeEpisodeId])
+
+  const commitEntityRows = useCallback((rows: ScriptEntity[]) => {
+    setEntities(rows)
+    onEntitiesChange?.(rows)
+  }, [onEntitiesChange])
 
   const reloadAll = useCallback(async () => {
     setLoading(true)
@@ -113,15 +202,14 @@ export default function ScriptAssetConsole({
         listScriptEntities(projectId),
         getAssetHubOverview({ projectId, scope: 'all' }),
       ])
-      setEntities(entityRows)
-      onEntitiesChange?.(entityRows)
+      commitEntityRows(entityRows)
       setAssetOverview(overview)
     } catch (error) {
       message.error(getApiErrorMessage(error, '加载剧本资产规划失败'))
     } finally {
       setLoading(false)
     }
-  }, [message, onEntitiesChange, projectId])
+  }, [commitEntityRows, message, projectId])
 
   useEffect(() => {
     void reloadAll()
@@ -231,6 +319,8 @@ export default function ScriptAssetConsole({
   }, [])
 
   const currentTypeEntities = entitiesByType[activeType]
+  const currentTypeLabel = entityTypeLabel(activeType)
+  const shouldHideTypeTabs = hideTypeTabs || availableTypes.length <= 1
   const filteredCurrentTypeEntities = useMemo(() => {
     const keyword = entityKeyword.trim().toLowerCase()
     if (!keyword) return currentTypeEntities
@@ -239,17 +329,24 @@ export default function ScriptAssetConsole({
     ))
   }, [currentTypeEntities, entityKeyword])
 
-  const mergeEntityIntoList = (rows: ScriptEntity[], entity: ScriptEntity): ScriptEntity[] => {
-    const idx = rows.findIndex((item) => item.id === entity.id)
-    if (idx < 0) return [...rows, entity]
-    const next = [...rows]
-    next[idx] = entity
-    return next
-  }
-
-  const upsertEntityInList = (entity: ScriptEntity) => {
+  const upsertEntityInList = useCallback((entity: ScriptEntity) => {
     setEntities((prev) => mergeEntityIntoList(prev, entity))
-  }
+  }, [])
+
+  const commitUpsertEntity = useCallback((entity: ScriptEntity) => {
+    commitEntityRows(mergeEntityIntoList(entities, entity))
+  }, [commitEntityRows, entities])
+
+  const updateSelectedEntityBindings = useCallback((
+    updater: (bindings: ScriptAssetBinding[], state: ScopedBindingsState) => ScriptAssetBinding[],
+  ) => {
+    if (!selectedEntity) return
+    const scopeState = splitBindingsByScope(selectedEntity.bindings, bindingBelongsToCurrentScope)
+    upsertEntityInList({
+      ...selectedEntity,
+      bindings: updater(selectedEntity.bindings, scopeState),
+    })
+  }, [bindingBelongsToCurrentScope, selectedEntity, upsertEntityInList])
 
   const handleCreateEntity = async () => {
     setSaving(true)
@@ -259,7 +356,7 @@ export default function ScriptAssetConsole({
         name: defaultEntityName(activeType),
         bindings: [],
       })
-      upsertEntityInList(created)
+      commitUpsertEntity(created)
       setSelectedEntityId(created.id)
       message.success(`已创建${entityTypeLabel(activeType)}实体`)
     } catch (error) {
@@ -283,7 +380,7 @@ export default function ScriptAssetConsole({
         alias: entityDraft.alias.trim() || null,
         description: entityDraft.description.trim() || null,
       })
-      upsertEntityInList(updated)
+      commitUpsertEntity(updated)
       message.success('实体信息已保存')
     } catch (error) {
       message.error(getApiErrorMessage(error, '保存实体信息失败'))
@@ -298,8 +395,7 @@ export default function ScriptAssetConsole({
     try {
       await deleteScriptEntity(pendingDeleteEntity.id)
       const nextEntities = entities.filter((item) => item.id !== pendingDeleteEntity.id)
-      setEntities(nextEntities)
-      onEntitiesChange?.(nextEntities)
+      commitEntityRows(nextEntities)
       if (selectedEntityId === pendingDeleteEntity.id) {
         const fallback = entitiesByType[activeType].find((item) => item.id !== pendingDeleteEntity.id)
         setSelectedEntityId(fallback?.id ?? null)
@@ -314,93 +410,75 @@ export default function ScriptAssetConsole({
     }
   }
 
-  const candidateOptions = useMemo(() => {
-    if (!assetOverview) return []
-    if (activeType === 'character') {
-      return assetOverview.characters.map((item) => ({ label: item.name, value: item.id, asset_name: item.name }))
-    }
-    if (activeType === 'location') {
-      return assetOverview.locations.map((item) => ({ label: item.name, value: item.id, asset_name: item.name }))
-    }
-    return assetOverview.voices.map((item) => ({ label: item.name, value: item.id, asset_name: item.name }))
-  }, [activeType, assetOverview])
+  const candidateOptions = useMemo(() => buildCandidateOptions(assetOverview, activeType), [activeType, assetOverview])
+  const currentBindingAssetType = getBindingAssetType(activeType)
+
+  const selectedBindingState = useMemo(() => splitBindingsByScope(
+    selectedEntity?.bindings ?? [],
+    bindingBelongsToCurrentScope,
+  ), [bindingBelongsToCurrentScope, selectedEntity?.bindings])
+
+  const visibleBindings = useMemo(() => selectedBindingState.scoped.filter((item) => (
+    item.asset_type === currentBindingAssetType
+  )), [currentBindingAssetType, selectedBindingState.scoped])
+
+  const inheritedBindings = useMemo(() => {
+    if (!scopedMode) return []
+    return selectedBindingState.unscoped.filter((item) => (
+      item.asset_type === currentBindingAssetType && bindingIsSharedDefault(item)
+    ))
+  }, [currentBindingAssetType, scopedMode, selectedBindingState.unscoped])
 
   const handleAppendBinding = (assetId: string) => {
-    if (!selectedEntity) return
-    const exists = selectedEntity.bindings.some((item) => item.asset_id === assetId && bindingBelongsToCurrentScope(item))
-    if (exists) return
     const option = candidateOptions.find((item) => item.value === assetId)
-    const scopeBindings = selectedEntity.bindings.filter((item) => bindingBelongsToCurrentScope(item))
-    const next: ScriptAssetBinding[] = [
-      ...selectedEntity.bindings,
-      normalizeBindingForScope({
-        asset_type: activeType === 'speaker' ? 'voice' : activeType,
-        asset_id: assetId,
-        asset_name: option?.asset_name ?? '',
-        role_tag: null,
-        priority: scopeBindings.length,
-        is_primary: scopeBindings.length === 0,
-        strategy: {},
-      }),
-    ]
-    upsertEntityInList({ ...selectedEntity, bindings: next })
+    if (!option) return
+    if (scopedMode && inheritedBindings.some((item) => item.asset_id === assetId)) {
+      message.info('该资产已作为旧默认绑定生效；如需保持现状，无需重复添加')
+      return
+    }
+    updateSelectedEntityBindings((bindings, state) => {
+      if (state.scoped.some((item) => item.asset_id === assetId)) return bindings
+      const nextScoped = normalizeBindingList([
+        ...state.scoped,
+        normalizeBindingForScope({
+          asset_type: getBindingAssetType(activeType),
+          asset_id: assetId,
+          asset_name: option.asset_name,
+          role_tag: null,
+          priority: state.scoped.length,
+          is_primary: state.scoped.length === 0,
+          strategy: {},
+        }),
+      ])
+      return [...state.unscoped, ...nextScoped]
+    })
   }
 
   const handleDeleteBinding = (assetId: string) => {
-    if (!selectedEntity) return
-    const remainedScoped = selectedEntity.bindings.filter((item) => (
-      !bindingBelongsToCurrentScope(item) || item.asset_id !== assetId
-    ))
-    const scopeBindings = remainedScoped.filter((item) => bindingBelongsToCurrentScope(item))
-    const normalizedScoped = scopeBindings.map((item, index) => ({ ...item, priority: index }))
-    if (normalizedScoped.length > 0 && !normalizedScoped.some((item) => item.is_primary)) {
-      const first = normalizedScoped[0]
-      if (first) {
-        first.is_primary = true
-      }
-    }
-    const nonScoped = remainedScoped.filter((item) => !bindingBelongsToCurrentScope(item))
-    upsertEntityInList({ ...selectedEntity, bindings: [...nonScoped, ...normalizedScoped] })
+    updateSelectedEntityBindings((_bindings, state) => {
+      const nextScoped = normalizeBindingList(state.scoped.filter((item) => item.asset_id !== assetId))
+      return [...state.unscoped, ...nextScoped]
+    })
   }
 
   const handlePrimaryChange = (assetId: string) => {
-    if (!selectedEntity) return
-    const normalized = selectedEntity.bindings.map((item) => {
-      if (!bindingBelongsToCurrentScope(item)) return item
-      return { ...item, is_primary: item.asset_id === assetId }
+    updateSelectedEntityBindings((_bindings, state) => {
+      const nextScoped = normalizeBindingList(state.scoped.map((item) => ({
+        ...item,
+        is_primary: item.asset_id === assetId,
+      })))
+      return [...state.unscoped, ...nextScoped]
     })
-    upsertEntityInList({ ...selectedEntity, bindings: normalized })
   }
 
   const handleSaveBindings = async () => {
     if (!selectedEntity) return
     setSaving(true)
     try {
-      const scopedSource = selectedEntity.bindings.filter((item) => bindingBelongsToCurrentScope(item))
-      const nonScoped = selectedEntity.bindings.filter((item) => !bindingBelongsToCurrentScope(item))
-      const scopedNormalized = scopedSource.map((item, index) => normalizeBindingForScope({
-        asset_type: item.asset_type,
-        asset_id: item.asset_id,
-        asset_name: item.asset_name ?? undefined,
-        role_tag: item.role_tag ?? undefined,
-        priority: index,
-        is_primary: Boolean(item.is_primary),
-        strategy: item.strategy ?? {},
-      }))
-      const nextBindings = [...nonScoped, ...scopedNormalized].map((item, index) => ({
-        asset_type: item.asset_type,
-        asset_id: item.asset_id,
-        asset_name: item.asset_name ?? undefined,
-        role_tag: item.role_tag ?? undefined,
-        priority: index,
-        is_primary: Boolean(item.is_primary),
-        strategy: item.strategy ?? {},
-      }))
+      const scopedNormalized = normalizeBindingList(selectedBindingState.scoped, normalizeBindingForScope)
+      const nextBindings = normalizeBindingList([...selectedBindingState.unscoped, ...scopedNormalized])
       const saved = await replaceScriptEntityBindings(selectedEntity.id, nextBindings)
-      const nextEntity = { ...selectedEntity, bindings: saved }
-      const nextEntities = mergeEntityIntoList(entities, nextEntity)
-      setEntities(nextEntities)
-      onEntitiesChange?.(nextEntities)
+      commitUpsertEntity({ ...selectedEntity, bindings: saved })
       message.success(scopedMode ? '当前分集绑定已保存' : '默认绑定已保存')
     } catch (error) {
       message.error(getApiErrorMessage(error, scopedMode ? '保存当前分集绑定失败' : '保存默认绑定失败'))
@@ -409,21 +487,232 @@ export default function ScriptAssetConsole({
     }
   }
 
-  const visibleBindings = selectedEntity
-    ? selectedEntity.bindings.filter((item) => bindingBelongsToCurrentScope(item))
-    : []
-
   const headerActions = (
     <Space>
       <Button onClick={() => { void reloadAll() }} loading={loading}>刷新资产池</Button>
       <Button type="primary" icon={<PlusOutlined />} onClick={handleCreateEntity} loading={saving}>
-        新增{entityTypeLabel(activeType)}
+        新增{currentTypeLabel}
       </Button>
     </Space>
   )
 
+  const typePane = (
+    <div className="np-script-asset-console-grid">
+      <section className="np-script-asset-pane np-script-asset-pane-left">
+        <div className="np-script-asset-pane-head">
+          <Text strong>{currentTypeLabel}实体</Text>
+        </div>
+        <div className="np-script-asset-pane-body">
+          <Space direction="vertical" size={8} style={{ width: '100%' }}>
+            <Input.Search
+              allowClear
+              value={entityKeyword}
+              onChange={(event) => setEntityKeyword(event.target.value)}
+              placeholder={`搜索${currentTypeLabel}实体`}
+            />
+            {filteredCurrentTypeEntities.length === 0 ? (
+              <Empty
+                image={Empty.PRESENTED_IMAGE_SIMPLE}
+                description={currentTypeEntities.length === 0
+                  ? `暂无${currentTypeLabel}实体`
+                  : '未匹配到搜索结果'}
+              />
+            ) : (
+              <List
+                size="small"
+                dataSource={filteredCurrentTypeEntities}
+                renderItem={(row) => (
+                  <List.Item
+                    className={`np-script-entity-item${selectedEntityId === row.id ? ' is-active' : ''}`}
+                    onClick={() => setSelectedEntityId(row.id)}
+                  >
+                    <Space direction="vertical" size={2} style={{ width: '100%', minWidth: 0 }}>
+                      <Text strong>{row.name}</Text>
+                      <Text type="secondary" className="np-script-entity-meta">
+                        {row.alias || row.description || '未补充说明'}
+                      </Text>
+                    </Space>
+                  </List.Item>
+                )}
+              />
+            )}
+          </Space>
+        </div>
+      </section>
+
+      <section className="np-script-asset-pane np-script-asset-pane-right">
+        <div className="np-script-asset-pane-head">
+          <Text strong>{selectedEntity ? `编辑：${selectedEntity.name}` : '实体详情'}</Text>
+        </div>
+        <div className="np-script-asset-pane-body">
+          <Space direction="vertical" size={12} style={{ width: '100%' }}>
+            <div className="np-script-asset-binding-block">
+              <Space direction="vertical" size={8} style={{ width: '100%' }}>
+                <Text strong>{scopedMode ? '当前分集绑定' : '默认绑定'}（{currentTypeLabel}）</Text>
+                {!selectedEntity ? (
+                  <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={`请选择左侧实体后配置${scopedMode ? '当前分集绑定' : '默认绑定'}`} />
+                ) : (
+                  <>
+                    <Text type="secondary">
+                      {activeType === 'speaker'
+                        ? '说话人绑定语音资产，分镜层只做情绪/语速微调。'
+                        : activeType === 'character'
+                          ? '角色绑定用于外观一致性，分镜层只做临时造型覆盖。'
+                          : '地点绑定用于场景一致性，分镜层建议优先使用地点变体覆盖。'}
+                    </Text>
+                    {scopedMode ? (
+                      <Text type="secondary">
+                        当前仅编辑本分集专属绑定；旧默认绑定会在下方单独展示，不会被本次保存覆盖。
+                      </Text>
+                    ) : null}
+                    <Select
+                      showSearch
+                      placeholder={`添加${currentTypeLabel}资产`}
+                      options={candidateOptions}
+                      optionFilterProp="label"
+                      onSelect={(value) => handleAppendBinding(String(value))}
+                    />
+                    {visibleBindings.length === 0 ? (
+                      <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={scopedMode ? '当前分集未绑定资产' : '未绑定资产'} />
+                    ) : (
+                      <List
+                        size="small"
+                        dataSource={visibleBindings}
+                        renderItem={(row) => (
+                          <List.Item className={`np-script-binding-item${row.is_primary ? ' is-primary' : ''}`}>
+                            <div className="np-script-binding-row">
+                              <Space size={6} wrap style={{ minWidth: 0 }}>
+                                <Tag className="np-status-tag">{row.asset_name || row.asset_id}</Tag>
+                                {row.role_tag ? <Tag className="np-status-tag">角色位：{row.role_tag}</Tag> : null}
+                                {row.is_primary ? <Tag className="np-status-tag np-status-completed">主绑定</Tag> : null}
+                              </Space>
+                              <Space size={4} className="np-script-binding-actions">
+                                {!row.is_primary ? (
+                                  <Button
+                                    type="text"
+                                    size="small"
+                                    onClick={() => handlePrimaryChange(row.asset_id)}
+                                  >
+                                    设为主
+                                  </Button>
+                                ) : null}
+                                <Button
+                                  type="text"
+                                  size="small"
+                                  danger
+                                  onClick={() => handleDeleteBinding(row.asset_id)}
+                                >
+                                  删除
+                                </Button>
+                              </Space>
+                            </div>
+                          </List.Item>
+                        )}
+                      />
+                    )}
+                    {scopedMode && inheritedBindings.length > 0 ? (
+                      <>
+                        <Alert
+                          type="info"
+                          showIcon
+                          message={`检测到 ${inheritedBindings.length} 个历史默认绑定`}
+                          description="这些绑定是旧版本留下的共享默认绑定，数据没有丢失，当前分集仍会继承使用。若你想改成当前分集专属，请重新添加当前分集绑定后保存。"
+                        />
+                        <List
+                          size="small"
+                          dataSource={inheritedBindings}
+                          renderItem={(row) => (
+                            <List.Item className={`np-script-binding-item${row.is_primary ? ' is-primary' : ''}`}>
+                              <div className="np-script-binding-row">
+                                <Space size={6} wrap style={{ minWidth: 0 }}>
+                                  <Tag className="np-status-tag">{row.asset_name || row.asset_id}</Tag>
+                                  <Tag className="np-status-tag">旧默认绑定</Tag>
+                                  {row.role_tag ? <Tag className="np-status-tag">角色位：{row.role_tag}</Tag> : null}
+                                  {row.is_primary ? <Tag className="np-status-tag np-status-completed">主绑定</Tag> : null}
+                                </Space>
+                              </div>
+                            </List.Item>
+                          )}
+                        />
+                      </>
+                    ) : null}
+                    <Button type="primary" onClick={() => { void handleSaveBindings() }} loading={saving}>
+                      {scopedMode ? '保存当前分集绑定' : '保存默认绑定'}
+                    </Button>
+                  </>
+                )}
+              </Space>
+            </div>
+
+            {selectedEntity ? (
+              <>
+                <div className="np-script-asset-meta-toggle">
+                  <Button
+                    type="text"
+                    size="small"
+                    icon={showEntityMeta ? <UpOutlined /> : <DownOutlined />}
+                    onClick={() => setShowEntityMeta((prev) => !prev)}
+                  >
+                    {showEntityMeta ? '收起实体信息（高级）' : '展开实体信息（高级）'}
+                  </Button>
+                </div>
+
+                {showEntityMeta ? (
+                  <div className="np-script-asset-meta-block">
+                    <Space direction="vertical" size={10} style={{ width: '100%' }}>
+                      <Text strong>实体信息（高级）</Text>
+                      <Input
+                        value={entityDraft.name}
+                        onChange={(event) => setEntityDraft((prev) => ({ ...prev, name: event.target.value }))}
+                        placeholder="名称"
+                      />
+                      <Input
+                        value={entityDraft.alias}
+                        onChange={(event) => setEntityDraft((prev) => ({ ...prev, alias: event.target.value }))}
+                        placeholder="别名（可选）"
+                      />
+                      <Input.TextArea
+                        value={entityDraft.description}
+                        onChange={(event) => setEntityDraft((prev) => ({ ...prev, description: event.target.value }))}
+                        autoSize={{ minRows: 2, maxRows: 4 }}
+                        placeholder="描述（可选）"
+                      />
+                      <Space wrap>
+                        <Button
+                          type="primary"
+                          icon={<SaveOutlined />}
+                          onClick={() => { void handleSaveEntityMeta() }}
+                          loading={saving}
+                        >
+                          保存实体信息
+                        </Button>
+                        <Button
+                          danger
+                          icon={<DeleteOutlined />}
+                          onClick={() => {
+                            if (!selectedEntity) return
+                            setPendingDeleteEntity(selectedEntity)
+                            setDeleteModalOpen(true)
+                          }}
+                        >
+                          删除实体
+                        </Button>
+                      </Space>
+                    </Space>
+                  </div>
+                ) : null}
+              </>
+            ) : null}
+          </Space>
+        </div>
+      </section>
+    </div>
+  )
+
   const consoleBody = loading ? (
     <div style={{ padding: 24, textAlign: 'center' }}><Spin /></div>
+  ) : shouldHideTypeTabs ? (
+    typePane
   ) : (
     <Tabs
       activeKey={activeType}
@@ -431,194 +720,7 @@ export default function ScriptAssetConsole({
       items={availableTypes.map((type) => ({
         key: type,
         label: `${entityTypeLabel(type)}（${entitiesByType[type].length}）`,
-      })).map((item) => ({
-        ...item,
-        children: (
-          <div className="np-script-asset-console-grid">
-            <section className="np-script-asset-pane np-script-asset-pane-left">
-              <div className="np-script-asset-pane-head">
-                <Text strong>{entityTypeLabel(activeType)}实体</Text>
-              </div>
-              <div className="np-script-asset-pane-body">
-                <Space direction="vertical" size={8} style={{ width: '100%' }}>
-                  <Input.Search
-                    allowClear
-                    value={entityKeyword}
-                    onChange={(event) => setEntityKeyword(event.target.value)}
-                    placeholder={`搜索${entityTypeLabel(activeType)}实体`}
-                  />
-                  {filteredCurrentTypeEntities.length === 0 ? (
-                    <Empty
-                      image={Empty.PRESENTED_IMAGE_SIMPLE}
-                      description={currentTypeEntities.length === 0
-                        ? `暂无${entityTypeLabel(activeType)}实体`
-                        : '未匹配到搜索结果'}
-                    />
-                  ) : (
-                    <List
-                      size="small"
-                      dataSource={filteredCurrentTypeEntities}
-                      renderItem={(row) => (
-                        <List.Item
-                          className={`np-script-entity-item${selectedEntityId === row.id ? ' is-active' : ''}`}
-                          onClick={() => setSelectedEntityId(row.id)}
-                        >
-                          <Space direction="vertical" size={2} style={{ width: '100%', minWidth: 0 }}>
-                            <Text strong>{row.name}</Text>
-                            <Text type="secondary" className="np-script-entity-meta">
-                              {row.alias || row.description || '未补充说明'}
-                            </Text>
-                          </Space>
-                        </List.Item>
-                      )}
-                    />
-                  )}
-                </Space>
-              </div>
-            </section>
-
-            <section className="np-script-asset-pane np-script-asset-pane-right">
-              <div className="np-script-asset-pane-head">
-                <Text strong>{selectedEntity ? `编辑：${selectedEntity.name}` : '实体详情'}</Text>
-              </div>
-              <div className="np-script-asset-pane-body">
-                <Space direction="vertical" size={12} style={{ width: '100%' }}>
-                  <div className="np-script-asset-binding-block">
-                    <Space direction="vertical" size={8} style={{ width: '100%' }}>
-                      <Text strong>{scopedMode ? '当前分集绑定' : '默认绑定'}（{entityTypeLabel(activeType)}）</Text>
-                      {!selectedEntity ? (
-                        <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={`请选择左侧实体后配置${scopedMode ? '当前分集绑定' : '默认绑定'}`} />
-                      ) : (
-                        <>
-                          <Text type="secondary">
-                            {activeType === 'speaker'
-                              ? '说话人绑定语音资产，分镜层只做情绪/语速微调。'
-                              : activeType === 'character'
-                                ? '角色绑定用于外观一致性，分镜层只做临时造型覆盖。'
-                                : '地点绑定用于场景一致性，分镜层建议优先使用地点变体覆盖。'}
-                          </Text>
-                          {scopedMode ? (
-                            <Text type="secondary">
-                              当前仅显示并保存本分集的绑定，不会覆盖其他分集或全局默认绑定。
-                            </Text>
-                          ) : null}
-                          <Select
-                            showSearch
-                            placeholder={`添加${entityTypeLabel(activeType)}资产`}
-                            options={candidateOptions}
-                            optionFilterProp="label"
-                            onSelect={(value) => handleAppendBinding(String(value))}
-                          />
-                          {visibleBindings.length === 0 ? (
-                            <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={scopedMode ? '当前分集未绑定资产' : '未绑定资产'} />
-                          ) : (
-                            <List
-                              size="small"
-                              dataSource={visibleBindings}
-                              renderItem={(row) => (
-                                <List.Item className={`np-script-binding-item${row.is_primary ? ' is-primary' : ''}`}>
-                                  <div className="np-script-binding-row">
-                                    <Space size={6} wrap style={{ minWidth: 0 }}>
-                                      <Tag className="np-status-tag">{row.asset_name || row.asset_id}</Tag>
-                                      {row.role_tag ? <Tag className="np-status-tag">角色位：{row.role_tag}</Tag> : null}
-                                      {row.is_primary ? <Tag className="np-status-tag np-status-completed">主绑定</Tag> : null}
-                                    </Space>
-                                    <Space size={4} className="np-script-binding-actions">
-                                      {!row.is_primary ? (
-                                        <Button
-                                          type="text"
-                                          size="small"
-                                          onClick={() => handlePrimaryChange(row.asset_id)}
-                                        >
-                                          设为主
-                                        </Button>
-                                      ) : null}
-                                      <Button
-                                        type="text"
-                                        size="small"
-                                        danger
-                                        onClick={() => handleDeleteBinding(row.asset_id)}
-                                      >
-                                        删除
-                                      </Button>
-                                    </Space>
-                                  </div>
-                                </List.Item>
-                              )}
-                            />
-                          )}
-                          <Button type="primary" onClick={() => { void handleSaveBindings() }} loading={saving}>
-                            {scopedMode ? '保存当前分集绑定' : '保存默认绑定'}
-                          </Button>
-                        </>
-                      )}
-                    </Space>
-                  </div>
-
-                  {selectedEntity ? (
-                    <>
-                      <div className="np-script-asset-meta-toggle">
-                        <Button
-                          type="text"
-                          size="small"
-                          icon={showEntityMeta ? <UpOutlined /> : <DownOutlined />}
-                          onClick={() => setShowEntityMeta((prev) => !prev)}
-                        >
-                          {showEntityMeta ? '收起实体信息（高级）' : '展开实体信息（高级）'}
-                        </Button>
-                      </div>
-
-                      {showEntityMeta ? (
-                        <div className="np-script-asset-meta-block">
-                          <Space direction="vertical" size={10} style={{ width: '100%' }}>
-                            <Text strong>实体信息（高级）</Text>
-                            <Input
-                              value={entityDraft.name}
-                              onChange={(event) => setEntityDraft((prev) => ({ ...prev, name: event.target.value }))}
-                              placeholder="名称"
-                            />
-                            <Input
-                              value={entityDraft.alias}
-                              onChange={(event) => setEntityDraft((prev) => ({ ...prev, alias: event.target.value }))}
-                              placeholder="别名（可选）"
-                            />
-                            <Input.TextArea
-                              value={entityDraft.description}
-                              onChange={(event) => setEntityDraft((prev) => ({ ...prev, description: event.target.value }))}
-                              autoSize={{ minRows: 2, maxRows: 4 }}
-                              placeholder="描述（可选）"
-                            />
-                            <Space wrap>
-                              <Button
-                                type="primary"
-                                icon={<SaveOutlined />}
-                                onClick={() => { void handleSaveEntityMeta() }}
-                                loading={saving}
-                              >
-                                保存实体信息
-                              </Button>
-                              <Button
-                                danger
-                                icon={<DeleteOutlined />}
-                                onClick={() => {
-                                  if (!selectedEntity) return
-                                  setPendingDeleteEntity(selectedEntity)
-                                  setDeleteModalOpen(true)
-                                }}
-                              >
-                                删除实体
-                              </Button>
-                            </Space>
-                          </Space>
-                        </div>
-                      ) : null}
-                    </>
-                  ) : null}
-                </Space>
-              </div>
-            </section>
-          </div>
-        ),
+        children: type === activeType ? typePane : null,
       }))}
     />
   )

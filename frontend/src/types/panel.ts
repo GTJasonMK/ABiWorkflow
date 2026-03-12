@@ -1,5 +1,7 @@
 import type { PanelEffectiveBinding, ScriptScopedOverride } from './scriptAssets'
 
+export type PanelTaskPhase = 'idle' | 'queued' | 'running' | 'succeeded' | 'failed' | string
+
 export interface Panel {
   id: string
   project_id: string
@@ -20,7 +22,12 @@ export interface Panel {
   tts_audio_url: string | null
   video_url: string | null
   lipsync_video_url: string | null
-  provider_task_id: string | null
+  video_provider_task_id: string | null
+  tts_provider_task_id: string | null
+  lipsync_provider_task_id: string | null
+  video_status: PanelTaskPhase
+  tts_status: PanelTaskPhase
+  lipsync_status: PanelTaskPhase
   status: string
   error_message: string | null
   created_at: string

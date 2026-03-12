@@ -10,6 +10,9 @@ REM --- Configurable variables ---------------------------------
 set "BACKEND_DIR=%~dp0backend"
 set "FRONTEND_DIR=%~dp0frontend"
 set "PYTEST_ARGS=-v"
+set "BACKEND_VENV_NAME=.venv-win"
+if defined ABI_BACKEND_VENV_NAME set "BACKEND_VENV_NAME=%ABI_BACKEND_VENV_NAME%"
+set "BACKEND_VENV_DIR=%BACKEND_DIR%\%BACKEND_VENV_NAME%"
 REM ------------------------------------------------------------
 
 echo ============================================================
@@ -20,14 +23,15 @@ echo.
 set "TOTAL_FAIL=0"
 
 REM --- Check backend venv ---
-if not exist "%BACKEND_DIR%\.venv\Scripts\activate.bat" (
-    echo [ERROR] Backend virtual env not found. Run install.bat first.
+if not exist "%BACKEND_VENV_DIR%\Scripts\activate.bat" (
+    echo [ERROR] Backend virtual env not found: backend\%BACKEND_VENV_NAME%
+    echo [ERROR] Run install.bat first.
     exit /b 1
 )
 
 REM === Activate backend venv ===
 echo [INFO] Activating backend virtual environment ...
-call "%BACKEND_DIR%\.venv\Scripts\activate.bat"
+call "%BACKEND_VENV_DIR%\Scripts\activate.bat"
 if %errorlevel% neq 0 (
     echo [ERROR] Failed to activate virtual environment.
     exit /b 1

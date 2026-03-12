@@ -68,7 +68,7 @@ async def websocket_progress(websocket: WebSocket, project_id: str):
         else:
             await websocket.send_json({
                 "type": "progress_unavailable",
-                "data": {"message": "实时进度暂不可用（当前为 SQLite 降级模式）"},
+                "data": {"message": "实时进度暂不可用（Redis 未连接）"},
             })
 
         while True:

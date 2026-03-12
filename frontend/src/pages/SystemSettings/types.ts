@@ -1,6 +1,7 @@
 export interface BackendSettingsFormValues {
   app_name: string
   debug: boolean
+  llm_provider: string
   llm_model: string
   llm_base_url: string
   llm_api_key: string

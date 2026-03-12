@@ -34,7 +34,12 @@ class Panel(Base):
 
     video_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
     lipsync_video_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
-    provider_task_id: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    video_provider_task_id: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    tts_provider_task_id: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    lipsync_provider_task_id: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    video_status: Mapped[str] = mapped_column(String(20), default="idle", nullable=False)
+    tts_status: Mapped[str] = mapped_column(String(20), default="idle", nullable=False)
+    lipsync_status: Mapped[str] = mapped_column(String(20), default="idle", nullable=False)
     status: Mapped[str] = mapped_column(String(20), default=PANEL_STATUS_DRAFT, nullable=False)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
 
@@ -49,6 +54,13 @@ class Panel(Base):
         back_populates="panel",
         cascade="all, delete-orphan",
         passive_deletes=True,
+    )
+    video_clips: Mapped[list["VideoClip"]] = relationship(
+        "VideoClip",
+        back_populates="panel",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        order_by="VideoClip.clip_order",
     )
     effective_binding: Mapped["PanelEffectiveBinding | None"] = relationship(
         "PanelEffectiveBinding",

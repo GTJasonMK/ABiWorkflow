@@ -8,10 +8,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.project_invalidation import (
     downgrade_project_after_generation_input_change,
-    invalidate_scene_outputs_for_regeneration,
+    invalidate_project_generation_outputs,
 )
 from app.database import get_db
-from app.models import Character, Project, SceneCharacter
+from app.models import Character, Project
 from app.project_status import PROJECT_BUSY_STATUSES
 from app.schemas.character import CharacterResponse, CharacterUpdate
 from app.schemas.common import ApiResponse
@@ -73,12 +73,8 @@ async def update_character(character_id: str, body: CharacterUpdate, db: AsyncSe
         setattr(character, key, value)
 
     if "reference_image_url" in changed_fields:
-        # 角色参考图会直接影响视频生成输入，必须让关联场景失效并重新生成。
-        scene_ids = list((await db.execute(
-            select(SceneCharacter.scene_id).where(SceneCharacter.character_id == character.id)
-        )).scalars().all())
-        if scene_ids:
-            await invalidate_scene_outputs_for_regeneration(db, scene_ids)
+        panel_ids = await invalidate_project_generation_outputs(db, project_id=character.project_id)
+        if panel_ids:
             await downgrade_project_after_generation_input_change(db, project)
 
     await db.commit()

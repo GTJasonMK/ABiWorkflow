@@ -8,13 +8,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.episode_status import EPISODE_STATUS_DRAFT
 from app.llm.base import LLMAdapter
-from app.models import Character, Episode, Panel, Project, Scene, SceneCharacter
+from app.models import Character, Episode, Panel, Project
 from app.panel_status import PANEL_STATUS_PENDING
 from app.project_status import PROJECT_STATUS_PARSED
-from app.scene_status import SCENE_STATUS_PENDING
 from app.services.composition_state import mark_completed_compositions_stale
 from app.services.progress import publish_progress
-from app.services.script_parser import ALLOWED_TRANSITIONS, NarrativeAnalysis, ScenePrompt, ScriptParserService
+from app.services.script_parser import NarrativeAnalysis, ScenePrompt, ScriptParserService
 
 
 @dataclass(slots=True)
@@ -118,12 +117,12 @@ async def parse_project_from_episodes(
             "message": f"正在生成第 {episode_index + 1}/{total_episodes} 集分镜提示词...",
             "percent": min(70, progress_base + 12),
         })
-        prompts = await parser.generate_scene_prompts(analysis)
+        prompts = await parser.generate_panel_prompts(analysis)
         if not prompts:
             raise RuntimeError(f"第 {episode_index + 1} 集未生成任何分镜提示词")
         if len(prompts) != len(analysis.scenes):
             raise RuntimeError(
-                f"第 {episode_index + 1} 集提示词数量({len(prompts)})与叙事场景数({len(analysis.scenes)})不一致"
+                f"第 {episode_index + 1} 集提示词数量({len(prompts)})与叙事片段数({len(analysis.scenes)})不一致"
             )
         works.append(EpisodeParseWork(plan=plan, analysis=analysis, prompts=prompts))
 
@@ -135,7 +134,6 @@ async def parse_project_from_episodes(
         "message": "正在清理历史解析数据...",
         "percent": 72,
     })
-    await db.execute(delete(Scene).where(Scene.project_id == project_id))
     await db.execute(delete(Panel).where(Panel.project_id == project_id))
     await db.execute(delete(Episode).where(Episode.project_id == project_id))
     await db.execute(delete(Character).where(Character.project_id == project_id))
@@ -172,7 +170,6 @@ async def parse_project_from_episodes(
         character_map[name] = entity
 
     max_duration = settings.video_provider_max_duration_seconds
-    scene_sequence_order = 0
     for episode_index, work in enumerate(works):
         episode = Episode(
             project_id=project_id,
@@ -197,10 +194,6 @@ async def parse_project_from_episodes(
                 raise RuntimeError(f"第 {episode_index + 1} 集第 {panel_index + 1} 个分镜缺少视频提示词")
 
             duration_seconds = min(max(0.1, float(prompt.duration_seconds or 5.0)), max_duration)
-            transition_hint = (prompt.transition_hint or "crossfade").strip().lower()
-            if transition_hint not in ALLOWED_TRANSITIONS:
-                transition_hint = "crossfade"
-
             camera_hint = (prompt.camera_movement or "").strip()
             style_keywords = (prompt.style_keywords or "").strip()
             negative_prompt = (prompt.negative_prompt or "").strip()
@@ -219,54 +212,11 @@ async def parse_project_from_episodes(
                 camera_hint=(camera_hint[:200] if camera_hint else None),
                 duration_seconds=duration_seconds,
                 style_preset=(style_keywords[:100] if style_keywords else None),
+                reference_image_url=setting_text.strip() or None,
                 tts_text=dialogue_text.strip() or None,
                 status=PANEL_STATUS_PENDING,
             )
             db.add(panel)
-
-            scene = Scene(
-                project_id=project_id,
-                sequence_order=scene_sequence_order,
-                title=title,
-                description=narrative_text.strip() or None,
-                video_prompt=visual_prompt,
-                negative_prompt=negative_prompt or None,
-                camera_movement=(camera_hint[:200] if camera_hint else None),
-                setting=setting_text.strip() or None,
-                style_keywords=(style_keywords[:500] if style_keywords else None),
-                dialogue=dialogue_text.strip() or None,
-                duration_seconds=duration_seconds,
-                transition_hint=transition_hint,
-                status=SCENE_STATUS_PENDING,
-            )
-            db.add(scene)
-
-            if narrative:
-                linked_character_names: set[str] = set()
-                for raw_character_name in narrative.character_names:
-                    normalized_name = (raw_character_name or "").strip()
-                    if not normalized_name:
-                        continue
-                    character = character_map.get(normalized_name)
-                    if character is None:
-                        continue
-                    if normalized_name in linked_character_names:
-                        continue
-
-                    action = ""
-                    if isinstance(raw_character_name, str):
-                        action = narrative.character_actions.get(raw_character_name, "")
-                    if not action:
-                        action = narrative.character_actions.get(normalized_name, "")
-
-                    db.add(SceneCharacter(
-                        scene=scene,
-                        character=character,
-                        action=(action or "").strip() or None,
-                    ))
-                    linked_character_names.add(normalized_name)
-
-            scene_sequence_order += 1
 
     project = (await db.execute(select(Project).where(Project.id == project_id))).scalar_one()
     project.status = PROJECT_STATUS_PARSED
